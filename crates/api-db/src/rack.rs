@@ -24,9 +24,60 @@ use model::rack::{Rack, RackConfig, RackState};
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
+use crate::state_controller_traits::{ControllerStateWriter, OutcomeWriter};
 use crate::{
     ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
 };
+
+pub struct RackControllerStateWriter;
+
+#[async_trait::async_trait]
+impl ControllerStateWriter for RackControllerStateWriter {
+    type Id = RackId;
+    type ControllerState = RackState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &RackId,
+        expected_version: ConfigVersion,
+        new_version: ConfigVersion,
+        new_state: &RackState,
+    ) -> DatabaseResult<()> {
+        sqlx::query(
+            "UPDATE racks SET controller_state = $1, controller_state_version = $2 \
+             WHERE id = $3 AND controller_state_version = $4",
+        )
+        .bind(sqlx::types::Json(new_state))
+        .bind(new_version)
+        .bind(id)
+        .bind(expected_version)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::new("try_update_controller_state", e))?;
+        Ok(())
+    }
+}
+
+pub struct RackOutcomeWriter;
+
+#[async_trait::async_trait]
+impl OutcomeWriter for RackOutcomeWriter {
+    type Id = RackId;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &RackId,
+        outcome: PersistentStateHandlerOutcome,
+    ) -> DatabaseResult<()> {
+        sqlx::query("UPDATE racks SET controller_state_outcome = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(outcome))
+            .bind(id)
+            .execute(txn)
+            .await
+            .map_err(|e| DatabaseError::new("update_controller_state_outcome", e))?;
+        Ok(())
+    }
+}
 
 #[derive(Copy, Clone)]
 pub struct IdColumn;

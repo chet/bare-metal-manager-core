@@ -19,7 +19,26 @@ use config_version::ConfigVersion;
 use model::switch::{SwitchControllerState, SwitchStateHistoryRecord};
 use sqlx::{FromRow, PgConnection};
 
+use crate::state_controller_traits::StateHistoryWriter;
 use crate::{DatabaseError, DatabaseResult};
+
+pub struct SwitchStateHistory;
+
+#[async_trait::async_trait]
+impl StateHistoryWriter for SwitchStateHistory {
+    type Id = SwitchId;
+    type ControllerState = SwitchControllerState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &SwitchId,
+        version: ConfigVersion,
+        state: &SwitchControllerState,
+    ) -> DatabaseResult<()> {
+        persist(txn, id, state, version).await?;
+        Ok(())
+    }
+}
 
 /// History of Switch states for a single Switch
 #[derive(Debug, Clone, FromRow)]

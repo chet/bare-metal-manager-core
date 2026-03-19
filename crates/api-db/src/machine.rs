@@ -57,6 +57,60 @@ use uuid::Uuid;
 use super::{DatabaseError, ObjectFilter, Transaction, queries};
 use crate::DatabaseResult;
 use crate::db_read::DbReader;
+use crate::state_controller_traits::{ControllerStateWriter, OutcomeWriter};
+
+/// [`ControllerStateWriter`] for machines.
+///
+/// Does not use optimistic locking because DPU child objects (synced via
+/// [`MachineStateControllerIO::synced_object_ids`]) may have different
+/// versions than the host.
+pub struct MachineControllerStateWriter;
+
+#[async_trait::async_trait]
+impl ControllerStateWriter for MachineControllerStateWriter {
+    type Id = MachineId;
+    type ControllerState = ManagedHostState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &MachineId,
+        _expected_version: ConfigVersion,
+        new_version: ConfigVersion,
+        new_state: &ManagedHostState,
+    ) -> DatabaseResult<()> {
+        sqlx::query(
+            "UPDATE machines SET controller_state_version=$1, controller_state=$2 WHERE id=$3",
+        )
+        .bind(new_version)
+        .bind(sqlx::types::Json(new_state))
+        .bind(id.to_string())
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::new("update machines state", e))?;
+        Ok(())
+    }
+}
+
+pub struct MachineOutcomeWriter;
+
+#[async_trait::async_trait]
+impl OutcomeWriter for MachineOutcomeWriter {
+    type Id = MachineId;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &MachineId,
+        outcome: PersistentStateHandlerOutcome,
+    ) -> DatabaseResult<()> {
+        sqlx::query("UPDATE machines SET controller_state_outcome = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(outcome))
+            .bind(id)
+            .execute(txn)
+            .await
+            .map_err(|e| DatabaseError::new("update_controller_state_outcome", e))?;
+        Ok(())
+    }
+}
 
 #[derive(Serialize)]
 struct ReprovisionRequestRestart {
@@ -187,15 +241,13 @@ pub async fn find_existing_machine(
     Ok(id)
 }
 
-/// Perform an arbitrary action to a Machine and advance it to the next state given the last
-/// state.
+/// Transitions a single machine to a new state, persisting both the state
+/// update and a history record.
 ///
-/// Arguments:
-///
-/// * `txn` - A reference to a currently open database transaction
-/// * `state` - A reference to a MachineState enum
-///
-// TODO: abhi, Make it private.
+/// This is used by imperative code paths (discovery, force deletion, etc.)
+/// that transition state outside the state controller processor. The
+/// processor uses [`MachineControllerStateWriter`] and
+/// [`MachineStateHistoryWriter`](crate::machine_state_history::MachineStateHistoryWriter) instead.
 pub async fn advance(
     machine: &Machine,
     txn: &mut PgConnection,
@@ -1752,6 +1804,7 @@ pub async fn update_state(
     Ok(())
 }
 
+/// Updates controller state for the host and all associated DPUs without
 pub async fn update_machine_validation_time(
     machine_id: &MachineId,
     txn: &mut PgConnection,

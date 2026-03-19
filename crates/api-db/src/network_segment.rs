@@ -37,9 +37,60 @@ use crate::db_read::DbReader;
 use crate::instance_address::UsedOverlayNetworkIpResolver;
 use crate::ip_allocator::{IpAllocator, UsedIpResolver};
 use crate::machine_interface::UsedAdminNetworkIpResolver;
+use crate::state_controller_traits::{ControllerStateWriter, OutcomeWriter};
 use crate::{
     ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
 };
+
+pub struct NetworkSegmentControllerStateWriter;
+
+#[async_trait::async_trait]
+impl ControllerStateWriter for NetworkSegmentControllerStateWriter {
+    type Id = NetworkSegmentId;
+    type ControllerState = NetworkSegmentControllerState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &NetworkSegmentId,
+        expected_version: ConfigVersion,
+        new_version: ConfigVersion,
+        new_state: &NetworkSegmentControllerState,
+    ) -> DatabaseResult<()> {
+        let query = "UPDATE network_segments SET controller_state_version=$1, controller_state=$2::json \
+                     WHERE id=$3::uuid AND controller_state_version=$4";
+        sqlx::query(query)
+            .bind(new_version)
+            .bind(sqlx::types::Json(new_state))
+            .bind(id)
+            .bind(expected_version)
+            .execute(txn)
+            .await
+            .map_err(|e| DatabaseError::query(query, e))?;
+        Ok(())
+    }
+}
+
+pub struct NetworkSegmentOutcomeWriter;
+
+#[async_trait::async_trait]
+impl OutcomeWriter for NetworkSegmentOutcomeWriter {
+    type Id = NetworkSegmentId;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &NetworkSegmentId,
+        outcome: PersistentStateHandlerOutcome,
+    ) -> DatabaseResult<()> {
+        let query = "UPDATE network_segments SET controller_state_outcome = $1 WHERE id = $2";
+        sqlx::query(query)
+            .bind(sqlx::types::Json(outcome))
+            .bind(id)
+            .execute(txn)
+            .await
+            .map_err(|e| DatabaseError::query(query, e))?;
+        Ok(())
+    }
+}
 
 #[derive(Copy, Clone)]
 pub struct IdColumn;
@@ -468,16 +519,7 @@ pub async fn try_update_controller_state(
         .await;
 
     match query_result {
-        Ok(_segment_id) => {
-            crate::network_segment_state_history::persist(
-                &mut *txn,
-                segment_id,
-                new_state,
-                next_version,
-            )
-            .await?;
-            Ok(true)
-        }
+        Ok(_segment_id) => Ok(true),
         Err(sqlx::Error::RowNotFound) => Ok(false),
         Err(e) => Err(DatabaseError::query(query, e)),
     }

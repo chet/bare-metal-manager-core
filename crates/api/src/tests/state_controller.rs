@@ -506,6 +506,62 @@ async fn create_test_object(id: String, txn: &mut PgConnection) -> TestObject {
         .unwrap()
 }
 
+pub struct TestOutcomeWriter;
+
+#[async_trait::async_trait]
+impl db::state_controller_traits::OutcomeWriter for TestOutcomeWriter {
+    type Id = String;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        object_id: &String,
+        outcome: PersistentStateHandlerOutcome,
+    ) -> Result<(), db::DatabaseError> {
+        let query = "UPDATE test_objects SET controller_state_outcome=$1::json WHERE id=$2";
+        sqlx::query(query)
+            .bind(sqlx::types::Json(outcome))
+            .bind(object_id)
+            .execute(txn)
+            .await
+            .map_err(|e| db::DatabaseError::query(query, e))?;
+        Ok(())
+    }
+}
+
+pub struct TestControllerStateWriter;
+
+#[async_trait::async_trait]
+impl db::state_controller_traits::ControllerStateWriter for TestControllerStateWriter {
+    type Id = String;
+    type ControllerState = TestObjectControllerState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        object_id: &String,
+        expected_version: ConfigVersion,
+        new_version: ConfigVersion,
+        new_state: &TestObjectControllerState,
+    ) -> Result<(), db::DatabaseError> {
+        let query = "UPDATE test_objects SET controller_state_version=$1, controller_state=$2::json
+            where id=$3 AND controller_state_version=$4 returning id";
+        let query_result = sqlx::query_scalar::<_, String>(query)
+            .bind(new_version)
+            .bind(sqlx::types::Json(new_state))
+            .bind(object_id)
+            .bind(expected_version)
+            .fetch_one(txn)
+            .await;
+
+        match query_result {
+            Ok(_object_id) => {}
+            Err(sqlx::Error::RowNotFound) => {}
+            Err(e) => return Err(db::DatabaseError::query(query, e)),
+        }
+
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl StateControllerIO for TestStateControllerIO {
     type ObjectId = String;
@@ -513,6 +569,10 @@ impl StateControllerIO for TestStateControllerIO {
     type ControllerState = TestObjectControllerState;
     type MetricsEmitter = NoopMetricsEmitter;
     type ContextObjects = TestStateControllerContextObjects;
+    type StateHistory =
+        db::state_controller_traits::NoopStateHistoryWriter<String, TestObjectControllerState>;
+    type ControllerStateWriter = TestControllerStateWriter;
+    type OutcomeWriter = TestOutcomeWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "test_state_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "test_state_controller_queued_objects";
@@ -559,50 +619,6 @@ impl StateControllerIO for TestStateControllerIO {
         Ok(state.controller_state.clone())
     }
 
-    async fn persist_controller_state(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        old_version: ConfigVersion,
-        new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError> {
-        let next_version = old_version.increment();
-
-        let query = "UPDATE test_objects SET controller_state_version=$1, controller_state=$2::json
-            where id=$3 AND controller_state_version=$4 returning id";
-        let query_result = sqlx::query_scalar::<_, String>(query)
-            .bind(next_version)
-            .bind(sqlx::types::Json(new_state))
-            .bind(object_id)
-            .bind(old_version)
-            .fetch_one(txn)
-            .await;
-
-        match query_result {
-            Ok(_object_id) => {}
-            Err(sqlx::Error::RowNotFound) => {}
-            Err(e) => return Err(DatabaseError::query(query, e)),
-        }
-
-        Ok(())
-    }
-
-    async fn persist_outcome(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        outcome: PersistentStateHandlerOutcome,
-    ) -> Result<(), DatabaseError> {
-        let query = "UPDATE test_objects SET controller_state_outcome=$1::json WHERE id=$2";
-        sqlx::query(query)
-            .bind(sqlx::types::Json(outcome))
-            .bind(object_id)
-            .execute(txn)
-            .await
-            .map_err(|e| DatabaseError::query(query, e))?;
-        Ok(())
-    }
-
     fn metric_state_names(state: &TestObjectControllerState) -> (&'static str, &'static str) {
         match state {
             TestObjectControllerState::A => ("a", ""),
@@ -629,6 +645,10 @@ impl StateControllerIO for PanicInListObjectsStateControllerIO {
     type ControllerState = TestObjectControllerState;
     type MetricsEmitter = NoopMetricsEmitter;
     type ContextObjects = TestStateControllerContextObjects;
+    type StateHistory =
+        db::state_controller_traits::NoopStateHistoryWriter<String, TestObjectControllerState>;
+    type ControllerStateWriter = TestControllerStateWriter;
+    type OutcomeWriter = TestOutcomeWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "test_state_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "test_state_controller_queued_objects";
@@ -657,25 +677,6 @@ impl StateControllerIO for PanicInListObjectsStateControllerIO {
         _state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {
         unreachable!("load_controller_state should never be called in this test")
-    }
-
-    async fn persist_controller_state(
-        &self,
-        _txn: &mut PgConnection,
-        _object_id: &Self::ObjectId,
-        _old_version: ConfigVersion,
-        _new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError> {
-        unreachable!("persist_controller_state should never be called in this test")
-    }
-
-    async fn persist_outcome(
-        &self,
-        _txn: &mut PgConnection,
-        _object_id: &Self::ObjectId,
-        _outcome: PersistentStateHandlerOutcome,
-    ) -> Result<(), DatabaseError> {
-        unreachable!("persist_outcome should never be called in this test")
     }
 
     fn metric_state_names(state: &TestObjectControllerState) -> (&'static str, &'static str) {

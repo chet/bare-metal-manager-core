@@ -25,9 +25,61 @@ use model::ib_partition::{
 use sqlx::{FromRow, PgConnection};
 
 use crate::db_read::DbReader;
+use crate::state_controller_traits::{ControllerStateWriter, OutcomeWriter};
 use crate::{
     ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
 };
+
+pub struct IBPartitionControllerStateWriter;
+
+#[async_trait::async_trait]
+impl ControllerStateWriter for IBPartitionControllerStateWriter {
+    type Id = IBPartitionId;
+    type ControllerState = IBPartitionControllerState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &IBPartitionId,
+        expected_version: ConfigVersion,
+        new_version: ConfigVersion,
+        new_state: &IBPartitionControllerState,
+    ) -> DatabaseResult<()> {
+        let query = "UPDATE ib_partitions SET controller_state_version=$1, controller_state=$2::json \
+                     WHERE id=$3::uuid AND controller_state_version=$4";
+        sqlx::query(query)
+            .bind(new_version)
+            .bind(sqlx::types::Json(new_state))
+            .bind(id)
+            .bind(expected_version)
+            .execute(txn)
+            .await
+            .map_err(|e| DatabaseError::query(query, e))?;
+        Ok(())
+    }
+}
+
+pub struct IBPartitionOutcomeWriter;
+
+#[async_trait::async_trait]
+impl OutcomeWriter for IBPartitionOutcomeWriter {
+    type Id = IBPartitionId;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &IBPartitionId,
+        outcome: PersistentStateHandlerOutcome,
+    ) -> DatabaseResult<()> {
+        let query =
+            "UPDATE ib_partitions SET controller_state_outcome = $1::json WHERE id = $2::uuid";
+        sqlx::query(query)
+            .bind(sqlx::types::Json(outcome))
+            .bind(id)
+            .execute(txn)
+            .await
+            .map_err(|e| DatabaseError::query(query, e))?;
+        Ok(())
+    }
+}
 
 #[derive(Copy, Clone)]
 pub struct IdColumn;

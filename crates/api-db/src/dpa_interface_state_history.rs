@@ -21,6 +21,26 @@ use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceStateHistory
 use sqlx::PgConnection;
 
 use super::DatabaseError;
+use crate::state_controller_traits::StateHistoryWriter;
+
+/// [`StateHistoryWriter`] for DPA interfaces.
+pub struct DpaInterfaceStateHistoryWriter;
+
+#[async_trait::async_trait]
+impl StateHistoryWriter for DpaInterfaceStateHistoryWriter {
+    type Id = DpaInterfaceId;
+    type ControllerState = DpaInterfaceControllerState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &DpaInterfaceId,
+        version: ConfigVersion,
+        state: &DpaInterfaceControllerState,
+    ) -> crate::DatabaseResult<()> {
+        persist(txn, *id, state, version).await?;
+        Ok(())
+    }
+}
 
 /// Store each state for debugging purpose.
 pub async fn persist(

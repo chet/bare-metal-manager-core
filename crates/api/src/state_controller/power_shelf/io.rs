@@ -18,11 +18,13 @@
 //! State Controller IO implementation for PowerShelves
 
 use carbide_uuid::power_shelf::PowerShelfId;
-use config_version::{ConfigVersion, Versioned};
-use db::power_shelf::PowerShelfSearchConfig;
+use config_version::Versioned;
+use db::power_shelf::{
+    PowerShelfControllerStateWriter, PowerShelfOutcomeWriter, PowerShelfSearchConfig,
+};
+use db::power_shelf_state_history::PowerShelfStateHistory;
 use db::{DatabaseError, ObjectColumnFilter, power_shelf as db_power_shelf};
 use model::StateSla;
-use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::power_shelf::{PowerShelf, PowerShelfControllerState, state_sla};
 use sqlx::PgConnection;
 
@@ -41,6 +43,9 @@ impl StateControllerIO for PowerShelfStateControllerIO {
     type ControllerState = PowerShelfControllerState;
     type MetricsEmitter = NoopMetricsEmitter;
     type ContextObjects = PowerShelfStateHandlerContextObjects;
+    type StateHistory = PowerShelfStateHistory;
+    type ControllerStateWriter = PowerShelfControllerStateWriter;
+    type OutcomeWriter = PowerShelfOutcomeWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "power_shelf_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "power_shelf_controller_queued_objects";
@@ -91,33 +96,6 @@ impl StateControllerIO for PowerShelfStateControllerIO {
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {
         Ok(state.controller_state.clone())
-    }
-
-    async fn persist_controller_state(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        old_version: ConfigVersion,
-        new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError> {
-        let _updated =
-            db_power_shelf::try_update_controller_state(txn, *object_id, old_version, new_state)
-                .await?;
-
-        // Persist state history for debugging purposes
-        let _history =
-            db::power_shelf_state_history::persist(txn, object_id, new_state, old_version).await?;
-
-        Ok(())
-    }
-
-    async fn persist_outcome(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        outcome: PersistentStateHandlerOutcome,
-    ) -> Result<(), DatabaseError> {
-        db_power_shelf::update_controller_state_outcome(txn, *object_id, outcome).await
     }
 
     fn metric_state_names(state: &PowerShelfControllerState) -> (&'static str, &'static str) {

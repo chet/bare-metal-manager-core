@@ -18,10 +18,11 @@
 //! State Controller IO implementation for dpa interfaces
 
 use carbide_uuid::dpa_interface::DpaInterfaceId;
-use config_version::{ConfigVersion, Versioned};
+use config_version::Versioned;
 use db::DatabaseError;
+use db::dpa_interface::{DpaInterfaceControllerStateWriter, DpaInterfaceOutcomeWriter};
+use db::dpa_interface_state_history::DpaInterfaceStateHistoryWriter;
 use model::StateSla;
-use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpa_interface::{self, DpaInterface, DpaInterfaceControllerState};
 use sqlx::PgConnection;
 
@@ -40,6 +41,9 @@ impl StateControllerIO for DpaInterfaceStateControllerIO {
     type ControllerState = DpaInterfaceControllerState;
     type MetricsEmitter = DpaInterfaceMetricsEmitter;
     type ContextObjects = DpaInterfaceStateHandlerContextObjects;
+    type StateHistory = DpaInterfaceStateHistoryWriter;
+    type ControllerStateWriter = DpaInterfaceControllerStateWriter;
+    type OutcomeWriter = DpaInterfaceOutcomeWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "dpa_interfaces_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "dpa_interfaces_controller_queued_objects";
@@ -93,28 +97,6 @@ impl StateControllerIO for DpaInterfaceStateControllerIO {
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {
         Ok(state.controller_state.clone())
-    }
-
-    async fn persist_controller_state(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        old_version: ConfigVersion,
-        new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError> {
-        let _updated =
-            db::dpa_interface::try_update_controller_state(txn, *object_id, old_version, new_state)
-                .await?;
-        Ok(())
-    }
-
-    async fn persist_outcome(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        outcome: PersistentStateHandlerOutcome,
-    ) -> Result<(), DatabaseError> {
-        db::dpa_interface::update_controller_state_outcome(txn, *object_id, outcome).await
     }
 
     fn metric_state_names(state: &DpaInterfaceControllerState) -> (&'static str, &'static str) {

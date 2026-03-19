@@ -18,10 +18,11 @@
 //! State Controller IO implementation for Machines
 
 use carbide_uuid::machine::MachineId;
-use config_version::{ConfigVersion, Versioned};
+use config_version::Versioned;
+use db::machine::{MachineControllerStateWriter, MachineOutcomeWriter};
+use db::machine_state_history::MachineStateHistoryWriter;
 use db::{self, DatabaseError};
 use model::StateSla;
-use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     self, DpuDiscoveringState, DpuInitState, HostHealthConfig, MachineValidatingState,
@@ -49,6 +50,9 @@ impl StateControllerIO for MachineStateControllerIO {
     type ControllerState = ManagedHostState;
     type MetricsEmitter = MachineMetricsEmitter;
     type ContextObjects = MachineStateHandlerContextObjects;
+    type StateHistory = MachineStateHistoryWriter;
+    type ControllerStateWriter = MachineControllerStateWriter;
+    type OutcomeWriter = MachineOutcomeWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "machine_state_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "machine_state_controller_queued_objects";
@@ -118,23 +122,13 @@ impl StateControllerIO for MachineStateControllerIO {
         Ok(Versioned::new(current.value, current.version))
     }
 
-    async fn persist_controller_state(
+    async fn synced_object_ids(
         &self,
         txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        _old_version: ConfigVersion,
-        new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError> {
-        db::machine::update_state(txn, object_id, new_state).await
-    }
-
-    async fn persist_outcome(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        outcome: PersistentStateHandlerOutcome,
-    ) -> Result<(), DatabaseError> {
-        db::machine::update_controller_state_outcome(txn, object_id, outcome).await
+        host_id: &Self::ObjectId,
+    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+        let dpus = db::machine::find_dpus_by_host_machine_id(txn, host_id).await?;
+        Ok(dpus.into_iter().map(|dpu| dpu.id).collect())
     }
 
     fn metric_state_names(state: &ManagedHostState) -> (&'static str, &'static str) {

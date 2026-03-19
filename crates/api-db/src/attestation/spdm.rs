@@ -27,7 +27,45 @@ use model::attestation::spdm::{
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use sqlx::PgConnection;
 
+use crate::state_controller_traits::{ControllerStateWriter, OutcomeWriter};
 use crate::{DatabaseError, DatabaseResult};
+
+/// [`ControllerStateWriter`] for SPDM attestation.
+///
+/// Wraps the existing [`persist_controller_state`] function which manages
+/// its own versioning through the state object.
+pub struct SpdmControllerStateWriter;
+
+#[async_trait::async_trait]
+impl ControllerStateWriter for SpdmControllerStateWriter {
+    type Id = SpdmObjectId;
+    type ControllerState = SpdmMachineStateSnapshot;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &SpdmObjectId,
+        _expected_version: ConfigVersion,
+        _new_version: ConfigVersion,
+        new_state: &SpdmMachineStateSnapshot,
+    ) -> DatabaseResult<()> {
+        persist_controller_state(txn, id, new_state).await
+    }
+}
+
+pub struct SpdmOutcomeWriter;
+
+#[async_trait::async_trait]
+impl OutcomeWriter for SpdmOutcomeWriter {
+    type Id = SpdmObjectId;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &SpdmObjectId,
+        outcome: PersistentStateHandlerOutcome,
+    ) -> DatabaseResult<()> {
+        persist_outcome(txn, id, outcome).await
+    }
+}
 
 pub async fn insert_or_update_machine_attestation_request(
     txn: &mut PgConnection,

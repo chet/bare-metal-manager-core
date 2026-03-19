@@ -17,16 +17,17 @@
 
 //! State Controller IO implementation for dpa interfaces
 
-use config_version::{ConfigVersion, Versioned};
+use config_version::Versioned;
 use db::DatabaseError;
 use db::attestation::spdm::{
-    load_snapshot_for_machine_and_device_id, load_snapshot_for_machine_with_no_device,
+    SpdmControllerStateWriter, SpdmOutcomeWriter, load_snapshot_for_machine_and_device_id,
+    load_snapshot_for_machine_with_no_device,
 };
+use db::spdm_state_history::SpdmStateHistory;
 use model::StateSla;
 use model::attestation::spdm::{
     AttestationState, SpdmMachineSnapshot, SpdmMachineStateSnapshot, SpdmObjectId,
 };
-use model::controller_outcome::PersistentStateHandlerOutcome;
 use sqlx::PgConnection;
 
 use crate::state_controller::io::StateControllerIO;
@@ -44,6 +45,9 @@ impl StateControllerIO for SpdmStateControllerIO {
     type ControllerState = SpdmMachineStateSnapshot;
     type MetricsEmitter = SpdmMetricsEmitter;
     type ContextObjects = SpdmStateHandlerContextObjects;
+    type StateHistory = SpdmStateHistory;
+    type ControllerStateWriter = SpdmControllerStateWriter;
+    type OutcomeWriter = SpdmOutcomeWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "attestation_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "attestation_controller_queued_objects";
@@ -81,25 +85,6 @@ impl StateControllerIO for SpdmStateControllerIO {
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {
         let version = state.machine.state_version;
         Ok(Versioned::new(state.clone().into(), version))
-    }
-
-    async fn persist_controller_state(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        _old_version: ConfigVersion,
-        new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError> {
-        db::attestation::spdm::persist_controller_state(txn, object_id, new_state).await
-    }
-
-    async fn persist_outcome(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        outcome: PersistentStateHandlerOutcome,
-    ) -> Result<(), DatabaseError> {
-        db::attestation::spdm::persist_outcome(txn, object_id, outcome).await
     }
 
     fn metric_state_names(

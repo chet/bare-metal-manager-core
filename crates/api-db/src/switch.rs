@@ -25,9 +25,60 @@ use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::switch::{NewSwitch, Switch, SwitchControllerState};
 use sqlx::PgConnection;
 
+use crate::state_controller_traits::{ControllerStateWriter, OutcomeWriter};
 use crate::{
     ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
 };
+
+pub struct SwitchControllerStateWriter;
+
+#[async_trait::async_trait]
+impl ControllerStateWriter for SwitchControllerStateWriter {
+    type Id = SwitchId;
+    type ControllerState = SwitchControllerState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &SwitchId,
+        expected_version: ConfigVersion,
+        new_version: ConfigVersion,
+        new_state: &SwitchControllerState,
+    ) -> DatabaseResult<()> {
+        sqlx::query(
+            "UPDATE switches SET controller_state = $1, controller_state_version = $2 \
+             WHERE id = $3 AND controller_state_version = $4",
+        )
+        .bind(sqlx::types::Json(new_state))
+        .bind(new_version)
+        .bind(id)
+        .bind(expected_version)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::new("try_update_controller_state", e))?;
+        Ok(())
+    }
+}
+
+pub struct SwitchOutcomeWriter;
+
+#[async_trait::async_trait]
+impl OutcomeWriter for SwitchOutcomeWriter {
+    type Id = SwitchId;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &SwitchId,
+        outcome: PersistentStateHandlerOutcome,
+    ) -> DatabaseResult<()> {
+        sqlx::query("UPDATE switches SET controller_state_outcome = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(outcome))
+            .bind(id)
+            .execute(txn)
+            .await
+            .map_err(|e| DatabaseError::new("update_controller_state_outcome", e))?;
+        Ok(())
+    }
+}
 
 #[derive(Copy, Clone)]
 pub struct IdColumn;

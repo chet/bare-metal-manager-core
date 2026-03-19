@@ -20,7 +20,26 @@ use model::rack::{RackState, RackStateHistory};
 use model::rack_state_history::DbRackStateHistory;
 use sqlx::PgConnection;
 
+use crate::state_controller_traits::StateHistoryWriter;
 use crate::{DatabaseError, DatabaseResult};
+
+pub struct RackStateHistoryWriter;
+
+#[async_trait::async_trait]
+impl StateHistoryWriter for RackStateHistoryWriter {
+    type Id = RackId;
+    type ControllerState = RackState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &RackId,
+        version: ConfigVersion,
+        state: &RackState,
+    ) -> DatabaseResult<()> {
+        super::rack_state_history::persist(txn, id, state, version).await?;
+        Ok(())
+    }
+}
 
 /// Retrieve the rack state history for a list of Racks
 ///

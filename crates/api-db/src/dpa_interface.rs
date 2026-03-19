@@ -32,9 +32,60 @@ use model::dpa_interface::{
 use model::machine::LoadSnapshotOptions;
 use sqlx::PgConnection;
 
-use super::{DatabaseError, dpa_interface_state_history};
+use super::DatabaseError;
 use crate::db_read::DbReader;
 use crate::managed_host;
+use crate::state_controller_traits::{ControllerStateWriter, OutcomeWriter};
+
+pub struct DpaInterfaceControllerStateWriter;
+
+#[async_trait::async_trait]
+impl ControllerStateWriter for DpaInterfaceControllerStateWriter {
+    type Id = DpaInterfaceId;
+    type ControllerState = DpaInterfaceControllerState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &DpaInterfaceId,
+        expected_version: ConfigVersion,
+        new_version: ConfigVersion,
+        new_state: &DpaInterfaceControllerState,
+    ) -> super::DatabaseResult<()> {
+        let query = "UPDATE dpa_interfaces SET controller_state_version=$1, controller_state=$2::json \
+                     WHERE id=$3::uuid AND controller_state_version=$4";
+        sqlx::query(query)
+            .bind(new_version)
+            .bind(sqlx::types::Json(new_state))
+            .bind(id)
+            .bind(expected_version)
+            .execute(txn)
+            .await
+            .map_err(|e| DatabaseError::query(query, e))?;
+        Ok(())
+    }
+}
+
+pub struct DpaInterfaceOutcomeWriter;
+
+#[async_trait::async_trait]
+impl OutcomeWriter for DpaInterfaceOutcomeWriter {
+    type Id = DpaInterfaceId;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &DpaInterfaceId,
+        outcome: PersistentStateHandlerOutcome,
+    ) -> super::DatabaseResult<()> {
+        let query = "UPDATE dpa_interfaces SET controller_state_outcome = $1 WHERE id = $2";
+        sqlx::query(query)
+            .bind(sqlx::types::Json(outcome))
+            .bind(id)
+            .execute(txn)
+            .await
+            .map_err(|e| DatabaseError::query(query, e))?;
+        Ok(())
+    }
+}
 
 pub async fn persist(
     value: NewDpaInterface,
@@ -409,10 +460,7 @@ pub async fn try_update_controller_state(
         .await;
 
     match query_result {
-        Ok(_segment_id) => {
-            dpa_interface_state_history::persist(&mut *txn, id, new_state, next_version).await?;
-            Ok(true)
-        }
+        Ok(_segment_id) => Ok(true),
         Err(sqlx::Error::RowNotFound) => Ok(false),
         Err(e) => Err(DatabaseError::query(query, e)),
     }
