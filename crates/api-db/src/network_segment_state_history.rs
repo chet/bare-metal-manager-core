@@ -20,7 +20,27 @@ use config_version::ConfigVersion;
 use model::network_segment::NetworkSegmentControllerState;
 use sqlx::PgConnection;
 
+use crate::state_controller_traits::StateHistoryWriter;
+
 use super::DatabaseError;
+
+pub struct NetworkSegmentStateHistoryWriter;
+
+#[async_trait::async_trait]
+impl StateHistoryWriter for NetworkSegmentStateHistoryWriter {
+    type Id = NetworkSegmentId;
+    type ControllerState = NetworkSegmentControllerState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &NetworkSegmentId,
+        version: ConfigVersion,
+        state: &NetworkSegmentControllerState,
+    ) -> crate::DatabaseResult<()> {
+        let next_version = version.increment();
+        persist(txn, *id, state, next_version).await
+    }
+}
 
 pub async fn for_segment(
     txn: &mut PgConnection,

@@ -29,6 +29,8 @@ use model::attestation::spdm::{
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use sqlx::PgConnection;
 
+use db::spdm_state_history::SpdmStateHistory;
+
 use crate::state_controller::io::StateControllerIO;
 use crate::state_controller::spdm::context::SpdmStateHandlerContextObjects;
 use crate::state_controller::spdm::metrics::SpdmMetricsEmitter;
@@ -44,6 +46,7 @@ impl StateControllerIO for SpdmStateControllerIO {
     type ControllerState = SpdmMachineStateSnapshot;
     type MetricsEmitter = SpdmMetricsEmitter;
     type ContextObjects = SpdmStateHandlerContextObjects;
+    type StateHistory = SpdmStateHistory;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "attestation_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "attestation_controller_queued_objects";

@@ -15,48 +15,45 @@
  * limitations under the License.
  */
 
-use carbide_uuid::dpa_interface::DpaInterfaceId;
+use carbide_uuid::infiniband::IBPartitionId;
 use config_version::ConfigVersion;
-use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceStateHistoryRecord};
+use model::ib_partition::IBPartitionControllerState;
 use sqlx::PgConnection;
 
 use crate::state_controller_traits::StateHistoryWriter;
+use crate::{DatabaseError, DatabaseResult};
 
-use super::DatabaseError;
-
-pub struct DpaInterfaceStateHistoryWriter;
+pub struct IBPartitionStateHistory;
 
 #[async_trait::async_trait]
-impl StateHistoryWriter for DpaInterfaceStateHistoryWriter {
-    type Id = DpaInterfaceId;
-    type ControllerState = DpaInterfaceControllerState;
+impl StateHistoryWriter for IBPartitionStateHistory {
+    type Id = IBPartitionId;
+    type ControllerState = IBPartitionControllerState;
 
     async fn persist(
         txn: &mut PgConnection,
-        id: &DpaInterfaceId,
+        id: &IBPartitionId,
         version: ConfigVersion,
-        state: &DpaInterfaceControllerState,
-    ) -> crate::DatabaseResult<()> {
+        state: &IBPartitionControllerState,
+    ) -> DatabaseResult<()> {
         let next_version = version.increment();
-        persist(txn, *id, state, next_version).await?;
-        Ok(())
+        persist(txn, id, state, next_version).await
     }
 }
 
-/// Store each state for debugging purpose.
 pub async fn persist(
     txn: &mut PgConnection,
-    interface_id: DpaInterfaceId,
-    state: &DpaInterfaceControllerState,
+    partition_id: &IBPartitionId,
+    state: &IBPartitionControllerState,
     state_version: ConfigVersion,
-) -> Result<DpaInterfaceStateHistoryRecord, DatabaseError> {
-    let query = "INSERT INTO dpa_interface_state_history (interface_id, state, state_version)
-            VALUES ($1, $2, $3) RETURNING interface_id, state::TEXT, state_version, timestamp";
-    sqlx::query_as::<_, DpaInterfaceStateHistoryRecord>(query)
-        .bind(interface_id)
+) -> DatabaseResult<()> {
+    let query = "INSERT INTO ib_partition_state_history (partition_id, state, state_version) VALUES ($1, $2, $3)";
+    sqlx::query(query)
+        .bind(partition_id)
         .bind(sqlx::types::Json(state))
         .bind(state_version)
-        .fetch_one(txn)
+        .execute(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
 }

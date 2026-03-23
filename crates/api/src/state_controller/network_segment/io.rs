@@ -25,6 +25,8 @@ use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::network_segment::{self, NetworkSegment, NetworkSegmentControllerState};
 use sqlx::PgConnection;
 
+use db::network_segment_state_history::NetworkSegmentStateHistoryWriter;
+
 use crate::state_controller::io::StateControllerIO;
 use crate::state_controller::network_segment::context::NetworkSegmentStateHandlerContextObjects;
 use crate::state_controller::network_segment::metrics::NetworkSegmentMetricsEmitter;
@@ -40,6 +42,8 @@ impl StateControllerIO for NetworkSegmentStateControllerIO {
     type ControllerState = NetworkSegmentControllerState;
     type MetricsEmitter = NetworkSegmentMetricsEmitter;
     type ContextObjects = NetworkSegmentStateHandlerContextObjects;
+    // History was previously bundled inside db::network_segment::try_update_controller_state().
+    type StateHistory = NetworkSegmentStateHistoryWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "network_segments_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "network_segments_controller_queued_objects";

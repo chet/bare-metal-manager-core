@@ -26,6 +26,8 @@ use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::power_shelf::{PowerShelf, PowerShelfControllerState, state_sla};
 use sqlx::PgConnection;
 
+use db::power_shelf_state_history::PowerShelfStateHistory;
+
 use crate::state_controller::io::StateControllerIO;
 use crate::state_controller::metrics::NoopMetricsEmitter;
 use crate::state_controller::power_shelf::context::PowerShelfStateHandlerContextObjects;
@@ -41,6 +43,7 @@ impl StateControllerIO for PowerShelfStateControllerIO {
     type ControllerState = PowerShelfControllerState;
     type MetricsEmitter = NoopMetricsEmitter;
     type ContextObjects = PowerShelfStateHandlerContextObjects;
+    type StateHistory = PowerShelfStateHistory;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "power_shelf_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "power_shelf_controller_queued_objects";

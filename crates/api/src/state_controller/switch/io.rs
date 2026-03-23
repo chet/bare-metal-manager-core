@@ -26,6 +26,8 @@ use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::switch::{Switch, SwitchControllerState, state_sla};
 use sqlx::PgConnection;
 
+use db::switch_state_history::SwitchStateHistory;
+
 use crate::state_controller::io::StateControllerIO;
 use crate::state_controller::metrics::NoopMetricsEmitter;
 use crate::state_controller::switch::context::SwitchStateHandlerContextObjects;
@@ -41,6 +43,7 @@ impl StateControllerIO for SwitchStateControllerIO {
     type ControllerState = SwitchControllerState;
     type MetricsEmitter = NoopMetricsEmitter;
     type ContextObjects = SwitchStateHandlerContextObjects;
+    type StateHistory = SwitchStateHistory;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "switch_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "switch_controller_queued_objects";

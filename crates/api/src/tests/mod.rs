@@ -101,6 +101,7 @@ mod site_explorer;
 mod sku;
 mod spdm;
 mod state_controller;
+mod state_history_writer;
 mod storage;
 mod switch;
 mod switch_state_controller;

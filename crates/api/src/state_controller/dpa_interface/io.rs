@@ -25,6 +25,8 @@ use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpa_interface::{self, DpaInterface, DpaInterfaceControllerState};
 use sqlx::PgConnection;
 
+use db::dpa_interface_state_history::DpaInterfaceStateHistoryWriter;
+
 use crate::state_controller::dpa_interface::context::DpaInterfaceStateHandlerContextObjects;
 use crate::state_controller::dpa_interface::metrics::DpaInterfaceMetricsEmitter;
 use crate::state_controller::io::StateControllerIO;
@@ -40,6 +42,8 @@ impl StateControllerIO for DpaInterfaceStateControllerIO {
     type ControllerState = DpaInterfaceControllerState;
     type MetricsEmitter = DpaInterfaceMetricsEmitter;
     type ContextObjects = DpaInterfaceStateHandlerContextObjects;
+    // History was previously bundled inside db::dpa_interface::try_update_controller_state().
+    type StateHistory = DpaInterfaceStateHistoryWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "dpa_interfaces_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "dpa_interfaces_controller_queued_objects";

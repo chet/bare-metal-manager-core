@@ -19,7 +19,26 @@ use config_version::ConfigVersion;
 use model::power_shelf::{PowerShelfControllerState, PowerShelfStateHistoryRecord};
 use sqlx::{FromRow, PgConnection};
 
+use crate::state_controller_traits::StateHistoryWriter;
 use crate::{DatabaseError, DatabaseResult};
+
+pub struct PowerShelfStateHistory;
+
+#[async_trait::async_trait]
+impl StateHistoryWriter for PowerShelfStateHistory {
+    type Id = PowerShelfId;
+    type ControllerState = PowerShelfControllerState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &PowerShelfId,
+        version: ConfigVersion,
+        state: &PowerShelfControllerState,
+    ) -> DatabaseResult<()> {
+        persist(txn, id, state, version).await?;
+        Ok(())
+    }
+}
 
 /// History of Power Shelf states for a single Power Shelf
 #[derive(Debug, Clone, FromRow)]

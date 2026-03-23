@@ -513,6 +513,7 @@ impl StateControllerIO for TestStateControllerIO {
     type ControllerState = TestObjectControllerState;
     type MetricsEmitter = NoopMetricsEmitter;
     type ContextObjects = TestStateControllerContextObjects;
+    type StateHistory = db::state_controller_traits::NoopStateHistoryWriter<String, TestObjectControllerState>;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "test_state_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "test_state_controller_queued_objects";
@@ -629,6 +630,7 @@ impl StateControllerIO for PanicInListObjectsStateControllerIO {
     type ControllerState = TestObjectControllerState;
     type MetricsEmitter = NoopMetricsEmitter;
     type ContextObjects = TestStateControllerContextObjects;
+    type StateHistory = db::state_controller_traits::NoopStateHistoryWriter<String, TestObjectControllerState>;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "test_state_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "test_state_controller_queued_objects";

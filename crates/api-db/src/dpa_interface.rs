@@ -32,7 +32,7 @@ use model::dpa_interface::{
 use model::machine::LoadSnapshotOptions;
 use sqlx::PgConnection;
 
-use super::{DatabaseError, dpa_interface_state_history};
+use super::DatabaseError;
 use crate::db_read::DbReader;
 use crate::managed_host;
 
@@ -409,10 +409,7 @@ pub async fn try_update_controller_state(
         .await;
 
     match query_result {
-        Ok(_segment_id) => {
-            dpa_interface_state_history::persist(&mut *txn, id, new_state, next_version).await?;
-            Ok(true)
-        }
+        Ok(_segment_id) => Ok(true),
         Err(sqlx::Error::RowNotFound) => Ok(false),
         Err(e) => Err(DatabaseError::query(query, e)),
     }

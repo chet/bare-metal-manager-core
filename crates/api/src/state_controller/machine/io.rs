@@ -29,6 +29,8 @@ use model::machine::{
 };
 use sqlx::PgConnection;
 
+use db::machine_state_history::MachineStateHistoryWriter;
+
 use crate::state_controller::io::StateControllerIO;
 use crate::state_controller::machine::context::MachineStateHandlerContextObjects;
 use crate::state_controller::machine::metrics::MachineMetricsEmitter;
@@ -49,6 +51,8 @@ impl StateControllerIO for MachineStateControllerIO {
     type ControllerState = ManagedHostState;
     type MetricsEmitter = MachineMetricsEmitter;
     type ContextObjects = MachineStateHandlerContextObjects;
+    // Machine handles host + DPU history in the writer.
+    type StateHistory = MachineStateHistoryWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "machine_state_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "machine_state_controller_queued_objects";

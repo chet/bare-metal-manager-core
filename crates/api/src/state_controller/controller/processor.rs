@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ::db::DatabaseError;
+use ::db::state_controller_traits::StateHistoryWriter;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
@@ -680,6 +681,7 @@ async fn process_object<IO: StateControllerIO>(
             }
             io.persist_controller_state(&mut txn, &object_id, controller_state.version, next)
                 .await?;
+            IO::StateHistory::persist(&mut txn, &object_id, controller_state.version, next).await?;
         }
 
         let is_success = handler_outcome.is_ok();

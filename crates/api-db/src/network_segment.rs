@@ -468,16 +468,7 @@ pub async fn try_update_controller_state(
         .await;
 
     match query_result {
-        Ok(_segment_id) => {
-            crate::network_segment_state_history::persist(
-                &mut *txn,
-                segment_id,
-                new_state,
-                next_version,
-            )
-            .await?;
-            Ok(true)
-        }
+        Ok(_segment_id) => Ok(true),
         Err(sqlx::Error::RowNotFound) => Ok(false),
         Err(e) => Err(DatabaseError::query(query, e)),
     }

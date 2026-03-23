@@ -21,6 +21,34 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgConnection};
 
 use crate::DatabaseError;
+use crate::state_controller_traits::StateHistoryWriter;
+
+/// [`StateHistoryWriter`] for machines.
+///
+/// Persists state history for both the host machine and all associated DPUs,
+/// matching the behavior of [`crate::machine::update_state()`].
+pub struct MachineStateHistoryWriter;
+
+#[async_trait::async_trait]
+impl StateHistoryWriter for MachineStateHistoryWriter {
+    type Id = MachineId;
+    type ControllerState = ManagedHostState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        host_id: &MachineId,
+        version: ConfigVersion,
+        state: &ManagedHostState,
+    ) -> crate::DatabaseResult<()> {
+        let next_version = version.increment();
+        persist(txn, host_id, state, next_version).await?;
+        let dpus = crate::machine::find_dpus_by_host_machine_id(txn, host_id).await?;
+        for dpu in &dpus {
+            persist(txn, &dpu.id, state, next_version).await?;
+        }
+        Ok(())
+    }
+}
 
 /// History of Machine states for a single Machine
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

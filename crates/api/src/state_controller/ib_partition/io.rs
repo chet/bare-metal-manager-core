@@ -25,6 +25,8 @@ use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::ib_partition::{self, IBPartition, IBPartitionControllerState};
 use sqlx::PgConnection;
 
+use db::ib_partition_state_history::IBPartitionStateHistory;
+
 use crate::state_controller::ib_partition::context::IBPartitionStateHandlerContextObjects;
 use crate::state_controller::io::StateControllerIO;
 use crate::state_controller::metrics::NoopMetricsEmitter;
@@ -40,6 +42,7 @@ impl StateControllerIO for IBPartitionStateControllerIO {
     type ControllerState = IBPartitionControllerState;
     type MetricsEmitter = NoopMetricsEmitter;
     type ContextObjects = IBPartitionStateHandlerContextObjects;
+    type StateHistory = IBPartitionStateHistory;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "ib_partition_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "ib_partition_controller_queued_objects";

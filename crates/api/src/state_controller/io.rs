@@ -16,6 +16,7 @@
  */
 use config_version::{ConfigVersion, Versioned};
 use db::DatabaseError;
+use db::state_controller_traits::StateHistoryWriter;
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use sqlx::PgConnection;
@@ -54,6 +55,13 @@ pub trait StateControllerIO: Send + Sync + std::fmt::Debug + 'static + Default {
     type ContextObjects: StateHandlerContextObjects<
         ObjectMetrics = <Self::MetricsEmitter as MetricsEmitter>::ObjectMetrics,
     >;
+
+    /// Persists state transition history for debugging and audit purposes.
+    ///
+    /// The processor calls this automatically after each state transition.
+    /// Entities that don't have a history table yet can use
+    /// [`db::state_controller_traits::NoopStateHistoryWriter`] (or a dedicated noop struct).
+    type StateHistory: StateHistoryWriter<Id = Self::ObjectId, ControllerState = Self::ControllerState>;
 
     /// The name of the table in the database that will be used to generate run IDs
     /// The table will be locked whenever a new iteration is started
