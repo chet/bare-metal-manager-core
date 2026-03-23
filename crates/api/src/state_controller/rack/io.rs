@@ -18,8 +18,8 @@
 //! State Controller IO implementation for Racks
 
 use carbide_uuid::rack::RackId;
-use config_version::{ConfigVersion, Versioned};
-use db::rack::IdColumn;
+use config_version::Versioned;
+use db::rack::{IdColumn, RackControllerStateWriter};
 use db::{DatabaseError, ObjectColumnFilter, rack as db_rack};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -41,6 +41,7 @@ impl StateControllerIO for RackStateControllerIO {
     type ControllerState = RackState;
     type MetricsEmitter = NoopMetricsEmitter;
     type ContextObjects = RackStateHandlerContextObjects;
+    type ControllerStateWriter = RackControllerStateWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "rack_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "rack_controller_queued_objects";
@@ -84,23 +85,6 @@ impl StateControllerIO for RackStateControllerIO {
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {
         Ok(state.controller_state.clone())
-    }
-
-    async fn persist_controller_state(
-        &self,
-        txn: &mut PgConnection,
-        rack_id: &Self::ObjectId,
-        old_version: ConfigVersion,
-        new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError> {
-        let _updated =
-            db_rack::try_update_controller_state(txn, rack_id, old_version, new_state).await?;
-
-        // Persist state history for debugging purposes
-        let _history =
-            db::rack_state_history::persist(txn, rack_id, new_state, old_version).await?;
-
-        Ok(())
     }
 
     async fn persist_outcome(

@@ -18,7 +18,8 @@
 //! State Controller IO implementation for network segments
 
 use carbide_uuid::network::NetworkSegmentId;
-use config_version::{ConfigVersion, Versioned};
+use config_version::Versioned;
+use db::network_segment::NetworkSegmentControllerStateWriter;
 use db::{self, DatabaseError, ObjectColumnFilter};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -40,6 +41,7 @@ impl StateControllerIO for NetworkSegmentStateControllerIO {
     type ControllerState = NetworkSegmentControllerState;
     type MetricsEmitter = NetworkSegmentMetricsEmitter;
     type ContextObjects = NetworkSegmentStateHandlerContextObjects;
+    type ControllerStateWriter = NetworkSegmentControllerStateWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "network_segments_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "network_segments_controller_queued_objects";
@@ -94,23 +96,6 @@ impl StateControllerIO for NetworkSegmentStateControllerIO {
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {
         Ok(state.controller_state.clone())
-    }
-
-    async fn persist_controller_state(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        old_version: ConfigVersion,
-        new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError> {
-        let _updated = db::network_segment::try_update_controller_state(
-            txn,
-            *object_id,
-            old_version,
-            new_state,
-        )
-        .await?;
-        Ok(())
     }
 
     async fn persist_outcome(

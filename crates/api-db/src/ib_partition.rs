@@ -25,9 +25,40 @@ use model::ib_partition::{
 use sqlx::{FromRow, PgConnection};
 
 use crate::db_read::DbReader;
+use crate::state_controller_traits::ControllerStateWriter;
 use crate::{
     ColumnInfo, DatabaseError, DatabaseResult, FilterableQueryBuilder, ObjectColumnFilter,
 };
+
+pub struct IBPartitionControllerStateWriter;
+
+#[async_trait::async_trait]
+impl ControllerStateWriter for IBPartitionControllerStateWriter {
+    type Id = IBPartitionId;
+    type ControllerState = IBPartitionControllerState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &IBPartitionId,
+        expected_version: ConfigVersion,
+        new_version: ConfigVersion,
+        new_state: &IBPartitionControllerState,
+    ) -> DatabaseResult<bool> {
+        let query = "UPDATE ib_partitions SET controller_state_version=$1, controller_state=$2::json WHERE id=$3::uuid AND controller_state_version=$4";
+        let query_result = sqlx::query(query)
+            .bind(new_version)
+            .bind(sqlx::types::Json(new_state))
+            .bind(id)
+            .bind(expected_version)
+            .execute(txn)
+            .await;
+
+        match query_result {
+            Ok(result) => Ok(result.rows_affected() > 0),
+            Err(e) => Err(DatabaseError::query(query, e)),
+        }
+    }
+}
 
 #[derive(Copy, Clone)]
 pub struct IdColumn;

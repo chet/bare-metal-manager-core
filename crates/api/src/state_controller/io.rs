@@ -14,8 +14,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use config_version::{ConfigVersion, Versioned};
+use config_version::Versioned;
 use db::DatabaseError;
+use db::state_controller_traits::ControllerStateWriter;
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use sqlx::PgConnection;
@@ -55,6 +56,11 @@ pub trait StateControllerIO: Send + Sync + std::fmt::Debug + 'static + Default {
         ObjectMetrics = <Self::MetricsEmitter as MetricsEmitter>::ObjectMetrics,
     >;
 
+    /// Persists the controller state to the entity's main table.
+    ///
+    /// The processor calls this automatically after each state transition.
+    type ControllerStateWriter: ControllerStateWriter<Id = Self::ObjectId, ControllerState = Self::ControllerState>;
+
     /// The name of the table in the database that will be used to generate run IDs
     /// The table will be locked whenever a new iteration is started
     const DB_ITERATION_ID_TABLE_NAME: &'static str;
@@ -87,14 +93,22 @@ pub trait StateControllerIO: Send + Sync + std::fmt::Debug + 'static + Default {
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError>;
 
-    /// Persists the object state that is owned by the state controller
-    async fn persist_controller_state(
+    /// Returns IDs of child objects that should receive the same state
+    /// transition as the primary object.
+    ///
+    /// The processor calls [`ControllerStateWriter::persist`] for each
+    /// returned ID after persisting the primary object. Override this for
+    /// entities that sync state to dependent objects (e.g. machines syncing
+    /// state to their DPUs).
+    ///
+    /// Default: no synced objects.
+    async fn synced_object_ids(
         &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        old_version: ConfigVersion,
-        new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError>;
+        _txn: &mut PgConnection,
+        _object_id: &Self::ObjectId,
+    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+        Ok(vec![])
+    }
 
     /// Save the result of the most recent controller iteration
     async fn persist_outcome(

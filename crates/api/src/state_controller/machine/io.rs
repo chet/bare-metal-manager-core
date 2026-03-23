@@ -18,7 +18,8 @@
 //! State Controller IO implementation for Machines
 
 use carbide_uuid::machine::MachineId;
-use config_version::{ConfigVersion, Versioned};
+use config_version::Versioned;
+use db::machine::MachineControllerStateWriter;
 use db::{self, DatabaseError};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -49,6 +50,7 @@ impl StateControllerIO for MachineStateControllerIO {
     type ControllerState = ManagedHostState;
     type MetricsEmitter = MachineMetricsEmitter;
     type ContextObjects = MachineStateHandlerContextObjects;
+    type ControllerStateWriter = MachineControllerStateWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "machine_state_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "machine_state_controller_queued_objects";
@@ -118,14 +120,13 @@ impl StateControllerIO for MachineStateControllerIO {
         Ok(Versioned::new(current.value, current.version))
     }
 
-    async fn persist_controller_state(
+    async fn synced_object_ids(
         &self,
         txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        _old_version: ConfigVersion,
-        new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError> {
-        db::machine::update_state(txn, object_id, new_state).await
+        host_id: &Self::ObjectId,
+    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+        let dpus = db::machine::find_dpus_by_host_machine_id(txn, host_id).await?;
+        Ok(dpus.into_iter().map(|dpu| dpu.id).collect())
     }
 
     async fn persist_outcome(

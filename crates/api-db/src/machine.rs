@@ -57,6 +57,38 @@ use uuid::Uuid;
 use super::{DatabaseError, ObjectFilter, Transaction, queries};
 use crate::DatabaseResult;
 use crate::db_read::DbReader;
+use crate::state_controller_traits::ControllerStateWriter;
+
+/// [`ControllerStateWriter`] for machines.
+///
+/// Does not use optimistic locking because DPU child objects (synced via
+/// `synced_object_ids`) may have different versions than the host.
+pub struct MachineControllerStateWriter;
+
+#[async_trait::async_trait]
+impl ControllerStateWriter for MachineControllerStateWriter {
+    type Id = MachineId;
+    type ControllerState = ManagedHostState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &MachineId,
+        _expected_version: ConfigVersion,
+        new_version: ConfigVersion,
+        new_state: &ManagedHostState,
+    ) -> DatabaseResult<bool> {
+        sqlx::query(
+            "UPDATE machines SET controller_state_version=$1, controller_state=$2 WHERE id=$3",
+        )
+        .bind(new_version)
+        .bind(sqlx::types::Json(new_state))
+        .bind(id.to_string())
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::new("update machines state", e))?;
+        Ok(true)
+    }
+}
 
 #[derive(Serialize)]
 struct ReprovisionRequestRestart {

@@ -17,9 +17,10 @@
 
 //! State Controller IO implementation for dpa interfaces
 
-use config_version::{ConfigVersion, Versioned};
+use config_version::Versioned;
 use db::DatabaseError;
 use db::attestation::spdm::{
+    SpdmControllerStateWriter,
     load_snapshot_for_machine_and_device_id, load_snapshot_for_machine_with_no_device,
 };
 use model::StateSla;
@@ -44,6 +45,7 @@ impl StateControllerIO for SpdmStateControllerIO {
     type ControllerState = SpdmMachineStateSnapshot;
     type MetricsEmitter = SpdmMetricsEmitter;
     type ContextObjects = SpdmStateHandlerContextObjects;
+    type ControllerStateWriter = SpdmControllerStateWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "attestation_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "attestation_controller_queued_objects";
@@ -81,16 +83,6 @@ impl StateControllerIO for SpdmStateControllerIO {
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {
         let version = state.machine.state_version;
         Ok(Versioned::new(state.clone().into(), version))
-    }
-
-    async fn persist_controller_state(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        _old_version: ConfigVersion,
-        new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError> {
-        db::attestation::spdm::persist_controller_state(txn, object_id, new_state).await
     }
 
     async fn persist_outcome(

@@ -18,8 +18,8 @@
 //! State Controller IO implementation for Switches
 
 use carbide_uuid::switch::SwitchId;
-use config_version::{ConfigVersion, Versioned};
-use db::switch::SwitchSearchConfig;
+use config_version::Versioned;
+use db::switch::{SwitchControllerStateWriter, SwitchSearchConfig};
 use db::{DatabaseError, ObjectColumnFilter, switch as db_switch};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -41,6 +41,7 @@ impl StateControllerIO for SwitchStateControllerIO {
     type ControllerState = SwitchControllerState;
     type MetricsEmitter = NoopMetricsEmitter;
     type ContextObjects = SwitchStateHandlerContextObjects;
+    type ControllerStateWriter = SwitchControllerStateWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "switch_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "switch_controller_queued_objects";
@@ -91,23 +92,6 @@ impl StateControllerIO for SwitchStateControllerIO {
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {
         Ok(state.controller_state.clone())
-    }
-
-    async fn persist_controller_state(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        old_version: ConfigVersion,
-        new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError> {
-        let _updated =
-            db_switch::try_update_controller_state(txn, *object_id, old_version, new_state).await?;
-
-        // Persist state history for debugging purposes
-        let _history =
-            db::switch_state_history::persist(txn, object_id, new_state, old_version).await?;
-
-        Ok(())
     }
 
     async fn persist_outcome(

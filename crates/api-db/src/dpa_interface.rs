@@ -35,6 +35,37 @@ use sqlx::PgConnection;
 use super::{DatabaseError, dpa_interface_state_history};
 use crate::db_read::DbReader;
 use crate::managed_host;
+use crate::state_controller_traits::ControllerStateWriter;
+
+pub struct DpaInterfaceControllerStateWriter;
+
+#[async_trait::async_trait]
+impl ControllerStateWriter for DpaInterfaceControllerStateWriter {
+    type Id = DpaInterfaceId;
+    type ControllerState = DpaInterfaceControllerState;
+
+    async fn persist(
+        txn: &mut PgConnection,
+        id: &DpaInterfaceId,
+        expected_version: ConfigVersion,
+        new_version: ConfigVersion,
+        new_state: &DpaInterfaceControllerState,
+    ) -> super::DatabaseResult<bool> {
+        let query = "UPDATE dpa_interfaces SET controller_state_version=$1, controller_state=$2::json WHERE id=$3::uuid AND controller_state_version=$4";
+        let query_result = sqlx::query(query)
+            .bind(new_version)
+            .bind(sqlx::types::Json(new_state))
+            .bind(id)
+            .bind(expected_version)
+            .execute(txn)
+            .await;
+
+        match query_result {
+            Ok(result) => Ok(result.rows_affected() > 0),
+            Err(e) => Err(DatabaseError::query(query, e)),
+        }
+    }
+}
 
 pub async fn persist(
     value: NewDpaInterface,

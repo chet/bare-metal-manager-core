@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ::db::DatabaseError;
+use ::db::state_controller_traits::ControllerStateWriter;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
@@ -678,8 +679,29 @@ async fn process_object<IO: StateControllerIO>(
             if *next == controller_state.value {
                 tracing::warn!(state=?next, %object_id, "Transition to current state");
             }
-            io.persist_controller_state(&mut txn, &object_id, controller_state.version, next)
-                .await?;
+            let new_version = controller_state.version.increment();
+            let updated = IO::ControllerStateWriter::persist(
+                &mut txn,
+                &object_id,
+                controller_state.version,
+                new_version,
+                next,
+            )
+            .await?;
+
+            if updated {
+                // Sync state to child objects (e.g. DPUs for machines).
+                for child_id in io.synced_object_ids(&mut txn, &object_id).await? {
+                    IO::ControllerStateWriter::persist(
+                        &mut txn,
+                        &child_id,
+                        controller_state.version,
+                        new_version,
+                        next,
+                    )
+                    .await?;
+                }
+            }
         }
 
         let is_success = handler_outcome.is_ok();

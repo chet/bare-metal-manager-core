@@ -18,7 +18,8 @@
 //! State Controller IO implementation for Infiniband Partitions
 
 use carbide_uuid::infiniband::IBPartitionId;
-use config_version::{ConfigVersion, Versioned};
+use config_version::Versioned;
+use db::ib_partition::IBPartitionControllerStateWriter;
 use db::{self, DatabaseError, ObjectColumnFilter};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -40,6 +41,7 @@ impl StateControllerIO for IBPartitionStateControllerIO {
     type ControllerState = IBPartitionControllerState;
     type MetricsEmitter = NoopMetricsEmitter;
     type ContextObjects = IBPartitionStateHandlerContextObjects;
+    type ControllerStateWriter = IBPartitionControllerStateWriter;
 
     const DB_ITERATION_ID_TABLE_NAME: &'static str = "ib_partition_controller_iteration_ids";
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "ib_partition_controller_queued_objects";
@@ -89,19 +91,6 @@ impl StateControllerIO for IBPartitionStateControllerIO {
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {
         Ok(state.controller_state.clone())
-    }
-
-    async fn persist_controller_state(
-        &self,
-        txn: &mut PgConnection,
-        object_id: &Self::ObjectId,
-        old_version: ConfigVersion,
-        new_state: &Self::ControllerState,
-    ) -> Result<(), DatabaseError> {
-        let _updated =
-            db::ib_partition::try_update_controller_state(txn, *object_id, old_version, new_state)
-                .await?;
-        Ok(())
     }
 
     async fn persist_outcome(
