@@ -22,6 +22,7 @@ use chrono::prelude::*;
 use config_version::{ConfigVersion, Versioned};
 use futures::StreamExt;
 use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::expected_switch::ExpectedSwitchData;
 use model::metadata::Metadata;
 use model::rack::RackFirmwareUpgradeStatus;
 use model::switch::{NewSwitch, Switch, SwitchControllerState, SwitchReprovisionRequest};
@@ -60,13 +61,19 @@ pub struct SwitchSearchConfig {
     pub rack_id: Option<String>,
     pub bmc_mac_address: Option<MacAddress>,
 }
-pub async fn create(txn: &mut PgConnection, new_switch: &NewSwitch) -> DatabaseResult<Switch> {
+pub async fn create(
+    txn: &mut PgConnection,
+    new_switch: &NewSwitch,
+    expected_data: Option<&ExpectedSwitchData>,
+) -> DatabaseResult<Switch> {
     let state = SwitchControllerState::Created;
     let controller_state_version = ConfigVersion::initial();
     let version = ConfigVersion::initial();
 
     let default_metadata = Metadata::default();
-    let expected_metadata = new_switch.metadata.as_ref().unwrap_or(&default_metadata);
+    let expected_metadata = expected_data
+        .map(|d| &d.metadata)
+        .unwrap_or(&default_metadata);
     let metadata_name = match expected_metadata.name.as_str() {
         "" => new_switch.id.to_string(),
         name => name.to_string(),

@@ -17,7 +17,7 @@
 
 use carbide_uuid::rack::RackId;
 use db::{expected_rack as db_expected_rack, rack as db_rack};
-use model::expected_rack::ExpectedRack;
+use model::expected_rack::{ExpectedRack, ExpectedRackData};
 use model::rack::{
     FirmwareUpgradeState, RackConfig, RackMaintenanceState, RackPowerState, RackState,
     RackValidationState,
@@ -129,8 +129,10 @@ async fn create_expected_rack(pool: &sqlx::PgPool, rack_id: &RackId, rack_type: 
     let mut txn = pool.acquire().await.unwrap();
     let er = ExpectedRack {
         rack_id: rack_id.clone(),
-        rack_type: rack_type.to_string(),
-        ..Default::default()
+        data: ExpectedRackData {
+            rack_type: rack_type.to_string(),
+            ..Default::default()
+        },
     };
     db_expected_rack::create(&mut txn, &er).await.unwrap();
 }

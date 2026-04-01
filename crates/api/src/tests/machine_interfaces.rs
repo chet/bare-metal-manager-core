@@ -645,10 +645,9 @@ async fn test_max_one_interface_association(
             location: None,
         },
         bmc_mac_address: None,
-        metadata: None,
         rack_id: None,
     };
-    db::switch::create(&mut txn, &new_switch).await?;
+    db::switch::create(&mut txn, &new_switch, None).await?;
 
     db::machine_interface::associate_interface_with_machine(
         &interface.id,
@@ -667,10 +666,9 @@ async fn test_max_one_interface_association(
             voltage: None,
             location: None,
         },
-        metadata: None,
         rack_id: None,
     };
-    db::power_shelf::create(&mut txn, &new_power_shelf).await?;
+    db::power_shelf::create(&mut txn, &new_power_shelf, None).await?;
 
     let output = db::machine_interface::associate_interface_with_machine(
         &interface.id,
@@ -720,10 +718,9 @@ async fn test_power_shelf_association(
             voltage: Some(480),
             location: Some("Rack A1".to_string()),
         },
-        metadata: None,
         rack_id: None,
     };
-    db::power_shelf::create(&mut txn, &new_power_shelf).await?;
+    db::power_shelf::create(&mut txn, &new_power_shelf, None).await?;
 
     // Associate the interface with the power shelf
     let result = db::machine_interface::associate_interface_with_machine(
@@ -771,10 +768,9 @@ async fn test_switch_association(pool: sqlx::PgPool) -> Result<(), Box<dyn std::
             location: Some("Rack B2".to_string()),
         },
         bmc_mac_address: None,
-        metadata: None,
         rack_id: None,
     };
-    db::switch::create(&mut txn, &new_switch).await?;
+    db::switch::create(&mut txn, &new_switch, None).await?;
 
     // Associate the interface with the switch
     let result = db::machine_interface::associate_interface_with_machine(

@@ -173,16 +173,18 @@ impl FakePowerShelf {
         model::expected_power_shelf::ExpectedPowerShelf {
             expected_power_shelf_id: None,
             bmc_mac_address: self.bmc_mac_address,
-            bmc_username: self.bmc_username.clone(),
-            bmc_password: self.bmc_password.clone(),
-            serial_number: self.serial_number.clone(),
-            ip_address: Some(self.ip.parse().unwrap()),
-            metadata: Metadata {
-                name: format!("Test Power Shelf {}", self.serial_number),
-                description: format!("A test power shelf with serial {}", self.serial_number),
-                labels: HashMap::new(),
+            data: model::expected_power_shelf::ExpectedPowerShelfData {
+                bmc_username: self.bmc_username.clone(),
+                bmc_password: self.bmc_password.clone(),
+                serial_number: self.serial_number.clone(),
+                ip_address: Some(self.ip.parse().unwrap()),
+                metadata: Metadata {
+                    name: format!("Test Power Shelf {}", self.serial_number),
+                    description: format!("A test power shelf with serial {}", self.serial_number),
+                    labels: HashMap::new(),
+                },
+                rack_id: None,
             },
-            rack_id: None,
         }
     }
 }
@@ -2949,18 +2951,20 @@ async fn test_site_explorer_switch_discovery(
     let expected_switch = model::expected_switch::ExpectedSwitch {
         expected_switch_id: None,
         bmc_mac_address: bmc_mac,
-        nvos_mac_addresses: vec![bmc_mac],
-        serial_number: serial_number.clone(),
-        bmc_username: bmc_username.clone(),
-        bmc_password: bmc_password.clone(),
-        nvos_username: None,
-        nvos_password: None,
-        metadata: Metadata {
-            name: format!("Test Switch {}", serial_number),
-            description: format!("A test switch with serial {}", serial_number),
-            labels: HashMap::new(),
+        data: model::expected_switch::ExpectedSwitchData {
+            nvos_mac_addresses: vec![bmc_mac],
+            serial_number: serial_number.clone(),
+            bmc_username: bmc_username.clone(),
+            bmc_password: bmc_password.clone(),
+            nvos_username: None,
+            nvos_password: None,
+            metadata: Metadata {
+                name: format!("Test Switch {}", serial_number),
+                description: format!("A test switch with serial {}", serial_number),
+                labels: HashMap::new(),
+            },
+            rack_id: None,
         },
-        rack_id: None,
     };
     db::expected_switch::create(&mut txn, expected_switch).await?;
     txn.commit().await?;

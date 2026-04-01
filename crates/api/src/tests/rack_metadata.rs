@@ -17,6 +17,7 @@
 
 use carbide_uuid::rack::RackId;
 use db::{DatabaseError, rack as db_rack};
+use model::expected_rack::ExpectedRackData;
 use model::metadata::Metadata;
 use model::rack::RackConfig;
 
@@ -61,6 +62,11 @@ async fn test_rack_metadata_from_expected(
             .collect(),
     };
 
+    let expected_data = ExpectedRackData {
+        rack_type: String::new(),
+        metadata: expected_metadata,
+    };
+
     let rack = db_rack::create(
         &mut txn,
         &rack_id,
@@ -68,7 +74,7 @@ async fn test_rack_metadata_from_expected(
             rack_type: Some("NVL72".to_string()),
             ..Default::default()
         },
-        Some(&expected_metadata),
+        Some(&expected_data),
     )
     .await?;
 

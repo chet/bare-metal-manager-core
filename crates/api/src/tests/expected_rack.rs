@@ -96,12 +96,13 @@ async fn seed_expected_racks(txn: &mut sqlx::PgConnection) -> Vec<RackId> {
         txn,
         &model::expected_rack::ExpectedRack {
             rack_id: ids[0].clone(),
-            rack_type: "NVL72".to_string(),
-
-            metadata: model::metadata::Metadata {
-                name: "rack-1".to_string(),
-                description: "Test rack 1".to_string(),
-                labels: Default::default(),
+            data: model::expected_rack::ExpectedRackData {
+                rack_type: "NVL72".to_string(),
+                metadata: model::metadata::Metadata {
+                    name: "rack-1".to_string(),
+                    description: "Test rack 1".to_string(),
+                    labels: Default::default(),
+                },
             },
         },
     )
@@ -112,12 +113,13 @@ async fn seed_expected_racks(txn: &mut sqlx::PgConnection) -> Vec<RackId> {
         txn,
         &model::expected_rack::ExpectedRack {
             rack_id: ids[1].clone(),
-            rack_type: "NVL72".to_string(),
-
-            metadata: model::metadata::Metadata {
-                name: "rack-2".to_string(),
-                description: "Test rack 2".to_string(),
-                labels: Default::default(),
+            data: model::expected_rack::ExpectedRackData {
+                rack_type: "NVL72".to_string(),
+                metadata: model::metadata::Metadata {
+                    name: "rack-2".to_string(),
+                    description: "Test rack 2".to_string(),
+                    labels: Default::default(),
+                },
             },
         },
     )
@@ -128,14 +130,15 @@ async fn seed_expected_racks(txn: &mut sqlx::PgConnection) -> Vec<RackId> {
         txn,
         &model::expected_rack::ExpectedRack {
             rack_id: ids[2].clone(),
-            rack_type: "NVL36".to_string(),
-
-            metadata: model::metadata::Metadata {
-                name: "rack-3".to_string(),
-                description: "Test rack 3".to_string(),
-                labels: [("env".to_string(), "test".to_string())]
-                    .into_iter()
-                    .collect(),
+            data: model::expected_rack::ExpectedRackData {
+                rack_type: "NVL36".to_string(),
+                metadata: model::metadata::Metadata {
+                    name: "rack-3".to_string(),
+                    description: "Test rack 3".to_string(),
+                    labels: [("env".to_string(), "test".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
             },
         },
     )
@@ -157,9 +160,9 @@ async fn test_db_find_by_rack_id(pool: sqlx::PgPool) -> Result<(), Box<dyn std::
         .expect("Expected rack not found");
 
     assert_eq!(expected_rack.rack_id, ids[0]);
-    assert_eq!(expected_rack.rack_type, "NVL72");
-    assert_eq!(expected_rack.metadata.name, "rack-1");
-    assert_eq!(expected_rack.metadata.description, "Test rack 1");
+    assert_eq!(expected_rack.data.rack_type, "NVL72");
+    assert_eq!(expected_rack.data.metadata.name, "rack-1");
+    assert_eq!(expected_rack.data.metadata.description, "Test rack 1");
 
     Ok(())
 }
@@ -200,24 +203,25 @@ async fn test_db_create_and_find(pool: sqlx::PgPool) -> Result<(), Box<dyn std::
         &mut txn,
         &model::expected_rack::ExpectedRack {
             rack_id: rack_id.clone(),
-            rack_type: "NVL72".to_string(),
-
-            metadata,
+            data: model::expected_rack::ExpectedRackData {
+                rack_type: "NVL72".to_string(),
+                metadata,
+            },
         },
     )
     .await?;
 
     assert_eq!(created.rack_id, rack_id);
-    assert_eq!(created.rack_type, "NVL72");
-    assert_eq!(created.metadata.name, "test-rack");
-    assert_eq!(created.metadata.labels.get("env").unwrap(), "test");
+    assert_eq!(created.data.rack_type, "NVL72");
+    assert_eq!(created.data.metadata.name, "test-rack");
+    assert_eq!(created.data.metadata.labels.get("env").unwrap(), "test");
 
     let found = db::expected_rack::find_by_rack_id(&mut txn, &rack_id)
         .await?
         .expect("Should find the rack we just created");
 
     assert_eq!(found.rack_id, rack_id);
-    assert_eq!(found.rack_type, "NVL72");
+    assert_eq!(found.data.rack_type, "NVL72");
 
     Ok(())
 }
@@ -231,9 +235,10 @@ async fn test_db_duplicate_create(pool: sqlx::PgPool) -> Result<(), Box<dyn std:
         &mut txn,
         &model::expected_rack::ExpectedRack {
             rack_id: ids[0].clone(),
-            rack_type: "NVL72".to_string(),
-
-            metadata: model::metadata::Metadata::default(),
+            data: model::expected_rack::ExpectedRackData {
+                rack_type: "NVL72".to_string(),
+                metadata: model::metadata::Metadata::default(),
+            },
         },
     )
     .await;
@@ -255,15 +260,17 @@ async fn test_db_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Er
         .await?
         .expect("Expected rack not found");
 
-    assert_eq!(expected_rack.rack_type, "NVL72");
+    assert_eq!(expected_rack.data.rack_type, "NVL72");
 
     let updated = model::expected_rack::ExpectedRack {
         rack_id: ids[0].clone(),
-        rack_type: "NVL36".to_string(),
-        metadata: model::metadata::Metadata {
-            name: "updated-rack".to_string(),
-            description: "Updated description".to_string(),
-            labels: Default::default(),
+        data: model::expected_rack::ExpectedRackData {
+            rack_type: "NVL36".to_string(),
+            metadata: model::metadata::Metadata {
+                name: "updated-rack".to_string(),
+                description: "Updated description".to_string(),
+                labels: Default::default(),
+            },
         },
     };
 
@@ -275,8 +282,8 @@ async fn test_db_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Er
     let found = db::expected_rack::find_by_rack_id(&mut txn, &ids[0])
         .await?
         .unwrap();
-    assert_eq!(found.rack_type, "NVL36");
-    assert_eq!(found.metadata.name, "updated-rack");
+    assert_eq!(found.data.rack_type, "NVL36");
+    assert_eq!(found.data.metadata.name, "updated-rack");
 
     Ok(())
 }
@@ -784,5 +791,5 @@ async fn test_add_expected_rack_creates_rack_entry(pool: sqlx::PgPool) {
         .await
         .unwrap();
     assert!(expected.is_some(), "expected_rack entry should exist");
-    assert_eq!(expected.unwrap().rack_type, "NVL72");
+    assert_eq!(expected.unwrap().data.rack_type, "NVL72");
 }

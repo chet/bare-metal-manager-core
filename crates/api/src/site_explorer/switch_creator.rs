@@ -113,7 +113,7 @@ impl SwitchCreator {
     ) -> CarbideResult<Option<SwitchId>> {
         if !explored_managed_switch.nv_os_mac_addresses.is_empty() {
             let explored_macs = explored_managed_switch.nv_os_mac_addresses.clone();
-            if *explored_macs != expected_switch.nvos_mac_addresses {
+            if *explored_macs != expected_switch.data.nvos_mac_addresses {
                 db::expected_switch::update_nvos_mac_addresses(
                     &mut *txn,
                     expected_switch.bmc_mac_address,
@@ -151,9 +151,9 @@ impl SwitchCreator {
         expected_switch: &ExpectedSwitch,
         switch_id: SwitchId,
     ) -> CarbideResult<()> {
-        let name = match expected_switch.metadata.name.is_empty() {
-            true => expected_switch.serial_number.to_string(),
-            false => expected_switch.metadata.name.to_string(),
+        let name = match expected_switch.data.metadata.name.is_empty() {
+            true => expected_switch.data.serial_number.to_string(),
+            false => expected_switch.data.metadata.name.to_string(),
         };
 
         let config = model::switch::SwitchConfig {
@@ -166,13 +166,12 @@ impl SwitchCreator {
             id: switch_id,
             config,
             bmc_mac_address: Some(expected_switch.bmc_mac_address),
-            metadata: Some(expected_switch.metadata.clone()),
-            rack_id: expected_switch.rack_id.clone(),
+            rack_id: expected_switch.data.rack_id.clone(),
         };
 
-        _ = db::switch::create(txn, &new_switch).await?;
+        _ = db::switch::create(txn, &new_switch, Some(&expected_switch.data)).await?;
 
-        if let Some(ref rack_id) = expected_switch.rack_id {
+        if let Some(ref rack_id) = expected_switch.data.rack_id {
             let _ = crate::site_explorer::ensure_rack_exists(&mut *txn, rack_id).await?;
         }
 

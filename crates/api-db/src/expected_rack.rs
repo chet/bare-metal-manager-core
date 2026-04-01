@@ -52,10 +52,10 @@ pub async fn create(txn: &mut PgConnection, rack: &ExpectedRack) -> DatabaseResu
 
     sqlx::query_as(query)
         .bind(&rack.rack_id)
-        .bind(&rack.rack_type)
-        .bind(&rack.metadata.name)
-        .bind(&rack.metadata.description)
-        .bind(sqlx::types::Json(&rack.metadata.labels))
+        .bind(&rack.data.rack_type)
+        .bind(&rack.data.metadata.name)
+        .bind(&rack.data.metadata.description)
+        .bind(sqlx::types::Json(&rack.data.metadata.labels))
         .fetch_one(txn)
         .await
         .map_err(|err: sqlx::Error| match err {
@@ -105,10 +105,10 @@ pub async fn update(txn: &mut PgConnection, rack: &ExpectedRack) -> DatabaseResu
     let query = "UPDATE expected_racks SET rack_type=$1, metadata_name=$2, metadata_description=$3, metadata_labels=$4 WHERE rack_id=$5";
 
     let result = sqlx::query(query)
-        .bind(&rack.rack_type)
-        .bind(&rack.metadata.name)
-        .bind(&rack.metadata.description)
-        .bind(sqlx::types::Json(&rack.metadata.labels))
+        .bind(&rack.data.rack_type)
+        .bind(&rack.data.metadata.name)
+        .bind(&rack.data.metadata.description)
+        .bind(sqlx::types::Json(&rack.data.metadata.labels))
         .bind(&rack.rack_id)
         .execute(txn)
         .await

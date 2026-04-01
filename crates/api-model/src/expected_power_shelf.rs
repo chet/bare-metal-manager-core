@@ -34,6 +34,12 @@ pub struct ExpectedPowerShelf {
     #[serde(default)]
     pub expected_power_shelf_id: Option<Uuid>,
     pub bmc_mac_address: MacAddress,
+    #[serde(flatten)]
+    pub data: ExpectedPowerShelfData,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ExpectedPowerShelfData {
     pub bmc_username: String,
     pub serial_number: String,
     pub bmc_password: String,
@@ -55,12 +61,14 @@ impl<'r> FromRow<'r, PgRow> for ExpectedPowerShelf {
         Ok(ExpectedPowerShelf {
             expected_power_shelf_id: row.try_get("expected_power_shelf_id")?,
             bmc_mac_address: row.try_get("bmc_mac_address")?,
-            bmc_username: row.try_get("bmc_username")?,
-            serial_number: row.try_get("serial_number")?,
-            bmc_password: row.try_get("bmc_password")?,
-            ip_address: row.try_get("ip_address").ok(),
-            metadata,
-            rack_id: row.try_get("rack_id").ok(),
+            data: ExpectedPowerShelfData {
+                bmc_username: row.try_get("bmc_username")?,
+                serial_number: row.try_get("serial_number")?,
+                bmc_password: row.try_get("bmc_password")?,
+                ip_address: row.try_get("ip_address").ok(),
+                metadata,
+                rack_id: row.try_get("rack_id").ok(),
+            },
         })
     }
 }
@@ -74,15 +82,16 @@ impl From<ExpectedPowerShelf> for rpc::forge::ExpectedPowerShelf {
                 }
             }),
             bmc_mac_address: expected_power_shelf.bmc_mac_address.to_string(),
-            bmc_username: expected_power_shelf.bmc_username,
-            bmc_password: expected_power_shelf.bmc_password,
-            shelf_serial_number: expected_power_shelf.serial_number,
+            bmc_username: expected_power_shelf.data.bmc_username,
+            bmc_password: expected_power_shelf.data.bmc_password,
+            shelf_serial_number: expected_power_shelf.data.serial_number,
             ip_address: expected_power_shelf
+                .data
                 .ip_address
                 .map(|ip| ip.to_string())
                 .unwrap_or_default(),
-            metadata: Some(expected_power_shelf.metadata.into()),
-            rack_id: expected_power_shelf.rack_id,
+            metadata: Some(expected_power_shelf.data.metadata.into()),
+            rack_id: expected_power_shelf.data.rack_id,
         }
     }
 }
@@ -110,12 +119,14 @@ impl TryFrom<rpc::forge::ExpectedPowerShelf> for ExpectedPowerShelf {
         Ok(ExpectedPowerShelf {
             expected_power_shelf_id,
             bmc_mac_address,
-            bmc_username: rpc.bmc_username,
-            bmc_password: rpc.bmc_password,
-            serial_number: rpc.shelf_serial_number,
-            ip_address,
-            metadata,
-            rack_id: rpc.rack_id,
+            data: ExpectedPowerShelfData {
+                bmc_username: rpc.bmc_username,
+                bmc_password: rpc.bmc_password,
+                serial_number: rpc.shelf_serial_number,
+                ip_address,
+                metadata,
+                rack_id: rpc.rack_id,
+            },
         })
     }
 }
@@ -176,5 +187,57 @@ impl From<LinkedExpectedPowerShelf> for rpc::forge::LinkedExpectedPowerShelf {
             explored_endpoint_address: l.address,
             rack_id: l.rack_id,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that serde(flatten) correctly deserializes a flat JSON
+    /// into the envelope + ExpectedPowerShelfData structure.
+    #[test]
+    fn deserialize_flat_json_into_envelope_and_data() {
+        let json = r#"{
+            "expected_power_shelf_id": null,
+            "bmc_mac_address": "00:11:22:33:44:55",
+            "bmc_username": "admin",
+            "bmc_password": "secret",
+            "serial_number": "PS-001",
+            "ip_address": "10.0.0.1",
+            "rack_id": "rack-1"
+        }"#;
+
+        let shelf: ExpectedPowerShelf = serde_json::from_str(json).unwrap();
+
+        // Envelope fields
+        assert_eq!(shelf.bmc_mac_address.to_string(), "00:11:22:33:44:55");
+        assert!(shelf.expected_power_shelf_id.is_none());
+
+        // Data fields (via flatten)
+        assert_eq!(shelf.data.bmc_username, "admin");
+        assert_eq!(shelf.data.bmc_password, "secret");
+        assert_eq!(shelf.data.serial_number, "PS-001");
+        assert_eq!(shelf.data.ip_address, Some("10.0.0.1".parse().unwrap()));
+        assert_eq!(shelf.data.rack_id.unwrap().to_string(), "rack-1");
+    }
+
+    /// Verify that optional/defaulted fields deserialize correctly
+    /// when omitted from the JSON input.
+    #[test]
+    fn deserialize_minimal_json_uses_defaults() {
+        let json = r#"{
+            "bmc_mac_address": "00:11:22:33:44:55",
+            "bmc_username": "admin",
+            "bmc_password": "secret",
+            "serial_number": "PS-002"
+        }"#;
+
+        let shelf: ExpectedPowerShelf = serde_json::from_str(json).unwrap();
+
+        assert!(shelf.data.metadata.name.is_empty());
+        assert!(shelf.data.metadata.labels.is_empty());
+        assert!(shelf.data.ip_address.is_none());
+        assert!(shelf.data.rack_id.is_none());
     }
 }

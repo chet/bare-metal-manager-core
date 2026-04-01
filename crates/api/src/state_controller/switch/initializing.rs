@@ -77,7 +77,7 @@ async fn handle_wait_for_os_machine_interface(
         }
     };
 
-    let nvos_mac_addresses = &expected_switch.nvos_mac_addresses;
+    let nvos_mac_addresses = &expected_switch.data.nvos_mac_addresses;
     if nvos_mac_addresses.is_empty() {
         tracing::warn!(
             "Switch {:?}: no NVOS MAC addresses on expected switch for serial {}, BMC MAC {}",

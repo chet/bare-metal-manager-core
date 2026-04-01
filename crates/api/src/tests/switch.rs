@@ -208,11 +208,10 @@ async fn test_switch_database_operations(
         id: switch_id,
         config: config.clone(),
         bmc_mac_address: None,
-        metadata: None,
         rack_id: None,
     };
 
-    let created_switch = db_switch::create(&mut txn, &new_switch).await?;
+    let created_switch = db_switch::create(&mut txn, &new_switch, None).await?;
 
     assert_eq!(created_switch.id, switch_id);
     assert_eq!(created_switch.config.name, "Switch1");
@@ -260,11 +259,10 @@ async fn test_switch_status_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std
         id: switch_id,
         config: config.clone(),
         bmc_mac_address: None,
-        metadata: None,
         rack_id: None,
     };
 
-    let mut switch = db_switch::create(&mut txn, &new_switch).await?;
+    let mut switch = db_switch::create(&mut txn, &new_switch, None).await?;
 
     // Update the switch with status
     let status = SwitchStatus {
@@ -306,11 +304,10 @@ async fn test_switch_controller_state_transitions(
         id: switch_id,
         config: config.clone(),
         bmc_mac_address: None,
-        metadata: None,
         rack_id: None,
     };
 
-    let switch = db_switch::create(&mut txn, &new_switch).await?;
+    let switch = db_switch::create(&mut txn, &new_switch, None).await?;
 
     // Test controller state transitions
     let initial_state = &switch.controller_state.value;
@@ -402,11 +399,10 @@ async fn test_switch_conversion_roundtrip(
         id: switch_id,
         config: config.clone(),
         bmc_mac_address: None,
-        metadata: None,
         rack_id: None,
     };
 
-    let mut switch = db_switch::create(&mut txn, &new_switch).await?;
+    let mut switch = db_switch::create(&mut txn, &new_switch, None).await?;
 
     // Add status
     let status = SwitchStatus {
@@ -457,11 +453,10 @@ async fn test_switch_find_all(pool: sqlx::PgPool) -> Result<(), Box<dyn std::err
             id: switch_id,
             config: config.clone(),
             bmc_mac_address: None,
-            metadata: None,
             rack_id: None,
         };
 
-        let switch = db_switch::create(&mut txn, &new_switch).await?;
+        let switch = db_switch::create(&mut txn, &new_switch, None).await?;
         created_ids.push(switch.id);
     }
 
@@ -500,11 +495,10 @@ async fn test_switch_controller_state_outcome(
         id: switch_id,
         config: config.clone(),
         bmc_mac_address: None,
-        metadata: None,
         rack_id: None,
     };
 
-    let _switch = db_switch::create(&mut txn, &new_switch).await?;
+    let _switch = db_switch::create(&mut txn, &new_switch, None).await?;
 
     // Test updating controller state outcome
     let outcome =

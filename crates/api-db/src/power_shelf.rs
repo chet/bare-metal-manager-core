@@ -20,6 +20,7 @@ use chrono::prelude::*;
 use config_version::{ConfigVersion, Versioned};
 use futures::StreamExt;
 use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::expected_power_shelf::ExpectedPowerShelfData;
 use model::metadata::Metadata;
 use model::power_shelf::{NewPowerShelf, PowerShelf, PowerShelfControllerState};
 use sqlx::PgConnection;
@@ -61,15 +62,15 @@ impl ColumnInfo<'_> for NameColumn {
 pub async fn create(
     txn: &mut PgConnection,
     new_power_shelf: &NewPowerShelf,
+    expected_data: Option<&ExpectedPowerShelfData>,
 ) -> Result<PowerShelf, DatabaseError> {
     let state = PowerShelfControllerState::Initializing;
     let controller_state_version = ConfigVersion::initial();
     let version = ConfigVersion::initial();
 
     let default_metadata = Metadata::default();
-    let expected_metadata = new_power_shelf
-        .metadata
-        .as_ref()
+    let expected_metadata = expected_data
+        .map(|d| &d.metadata)
         .unwrap_or(&default_metadata);
     let metadata_name = match expected_metadata.name.as_str() {
         "" => new_power_shelf.id.to_string(),

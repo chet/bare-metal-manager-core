@@ -1508,11 +1508,10 @@ pub async fn new_power_shelf(
     let new_power_shelf = NewPowerShelf {
         id: power_shelf_id,
         config,
-        metadata: None,
         rack_id: None,
     };
 
-    let _power_shelf = db_power_shelf::create(&mut txn, &new_power_shelf)
+    let _power_shelf = db_power_shelf::create(&mut txn, &new_power_shelf, None)
         .await
         .map_err(|e| eyre::eyre!("Failed to create power shelf: {:?}", e))?;
 
@@ -1609,13 +1608,13 @@ pub async fn new_switch(
     let expected_switch = match name {
         Some(n) => expected_switches
             .iter()
-            .find(|s| s.metadata.name == n)
+            .find(|s| s.data.metadata.name == n)
             .ok_or(eyre::eyre!("No expected switch found"))?,
         None => expected_switches.first().unwrap(),
     };
 
     let switch_id = model::switch::switch_id::from_hardware_info(
-        &expected_switch.serial_number,
+        &expected_switch.data.serial_number,
         "NVIDIA",
         "Switch",
         carbide_uuid::switch::SwitchIdSource::ProductBoardChassisSerial,
@@ -1625,7 +1624,7 @@ pub async fn new_switch(
     .unwrap();
 
     let config = SwitchConfig {
-        name: expected_switch.metadata.name.clone(),
+        name: expected_switch.data.metadata.name.clone(),
         enable_nmxc: false,
         fabric_manager_config: None,
         location: location.or(Some("US/CA/DC/San Jose/1000 N Mathilda Ave".to_string())),
@@ -1635,11 +1634,10 @@ pub async fn new_switch(
         id: switch_id,
         config,
         bmc_mac_address: Some(expected_switch.bmc_mac_address),
-        metadata: None,
         rack_id: None,
     };
 
-    let _switch = db_switch::create(&mut txn, &new_switch)
+    let _switch = db_switch::create(&mut txn, &new_switch, None)
         .await
         .map_err(|e| eyre::eyre!("Failed to create switch: {:?}", e))?;
 
@@ -1763,7 +1761,7 @@ pub async fn new_mock_host_with_dpf(
 pub async fn create_expected_switches(
     txn: &mut sqlx::PgConnection,
 ) -> Vec<model::expected_switch::ExpectedSwitch> {
-    use model::expected_switch::ExpectedSwitch;
+    use model::expected_switch::{ExpectedSwitch, ExpectedSwitchData};
     use model::metadata::Metadata;
 
     use crate::tests::common::mac_address_pool::EXPECTED_SWITCH_BMC_MAC_ADDRESS_POOL;
@@ -1773,26 +1771,28 @@ pub async fn create_expected_switches(
         let switch = ExpectedSwitch {
             expected_switch_id: None,
             bmc_mac_address: EXPECTED_SWITCH_BMC_MAC_ADDRESS_POOL.allocate(),
-            nvos_mac_addresses: vec![EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL.allocate()],
-            serial_number: format!("SW-SN-{:03}", i + 1),
-            bmc_username: "ADMIN".into(),
-            bmc_password: "Pwd2023x0x0x0x7".into(),
-            nvos_username: if (3..=4).contains(&i) {
-                Some(format!("nvos_admin{}", i - 2))
-            } else {
-                None
+            data: ExpectedSwitchData {
+                nvos_mac_addresses: vec![EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL.allocate()],
+                serial_number: format!("SW-SN-{:03}", i + 1),
+                bmc_username: "ADMIN".into(),
+                bmc_password: "Pwd2023x0x0x0x7".into(),
+                nvos_username: if (3..=4).contains(&i) {
+                    Some(format!("nvos_admin{}", i - 2))
+                } else {
+                    None
+                },
+                nvos_password: if (3..=4).contains(&i) {
+                    Some(format!("nvos_pass{}", i - 2))
+                } else {
+                    None
+                },
+                metadata: Metadata {
+                    name: format!("Switch{}", i + 1),
+                    description: format!("Test Switch {}", i + 1),
+                    labels: HashMap::new(),
+                },
+                rack_id: None,
             },
-            nvos_password: if (3..=4).contains(&i) {
-                Some(format!("nvos_pass{}", i - 2))
-            } else {
-                None
-            },
-            metadata: Metadata {
-                name: format!("Switch{}", i + 1),
-                description: format!("Test Switch {}", i + 1),
-                labels: HashMap::new(),
-            },
-            rack_id: None,
         };
         let result = db::expected_switch::create(txn, switch)
             .await
@@ -1803,7 +1803,7 @@ pub async fn create_expected_switches(
             .map_err(|e| eyre::eyre!("Failed to get admin network segment: {:?}", e))
             .unwrap();
 
-        for nvos_mac in &result.nvos_mac_addresses.clone() {
+        for nvos_mac in &result.data.nvos_mac_addresses.clone() {
             db::machine_interface::create(
                 txn,
                 &network_segment,
@@ -1842,7 +1842,7 @@ pub async fn create_expected_switches(
 pub async fn create_expected_power_shelves(
     txn: &mut sqlx::PgConnection,
 ) -> Vec<model::expected_power_shelf::ExpectedPowerShelf> {
-    use model::expected_power_shelf::ExpectedPowerShelf;
+    use model::expected_power_shelf::{ExpectedPowerShelf, ExpectedPowerShelfData};
     use model::metadata::Metadata;
 
     use crate::tests::common::mac_address_pool::EXPECTED_POWER_SHELF_BMC_MAC_ADDRESS_POOL;
@@ -1852,16 +1852,18 @@ pub async fn create_expected_power_shelves(
         let power_shelf = ExpectedPowerShelf {
             expected_power_shelf_id: None,
             bmc_mac_address: EXPECTED_POWER_SHELF_BMC_MAC_ADDRESS_POOL.allocate(),
-            serial_number: format!("PS-SN-{:03}", i + 1),
-            bmc_username: "ADMIN".into(),
-            bmc_password: "Pwd2023x0x0x0x0x7".into(),
-            ip_address: if (3..=4).contains(&i) {
-                Some(format!("192.168.1.{}", 100 + i - 3).parse().unwrap())
-            } else {
-                None
+            data: ExpectedPowerShelfData {
+                serial_number: format!("PS-SN-{:03}", i + 1),
+                bmc_username: "ADMIN".into(),
+                bmc_password: "Pwd2023x0x0x0x0x7".into(),
+                ip_address: if (3..=4).contains(&i) {
+                    Some(format!("192.168.1.{}", 100 + i - 3).parse().unwrap())
+                } else {
+                    None
+                },
+                metadata: Metadata::default(),
+                rack_id: None,
             },
-            metadata: Metadata::default(),
-            rack_id: None,
         };
         let result = db::expected_power_shelf::create(txn, power_shelf)
             .await

@@ -37,10 +37,16 @@ pub async fn add_expected_rack(
         .try_into()
         .map_err(CarbideError::from)?;
 
-    if api.runtime_config.rack_types.get(&rack.rack_type).is_none() {
+    // Validate the rack_type exists in configuration.
+    if api
+        .runtime_config
+        .rack_types
+        .get(&rack.data.rack_type)
+        .is_none()
+    {
         return Err(CarbideError::InvalidArgument(format!(
             "Unknown rack_type: {}. Must be one of: {:?}",
-            rack.rack_type,
+            rack.data.rack_type,
             api.runtime_config
                 .rack_types
                 .rack_types
@@ -64,19 +70,20 @@ pub async fn add_expected_rack(
         .into());
     }
 
-    if api.runtime_config.rack_types.get(&rack.rack_type).is_none() {
-        return Err(CarbideError::InvalidArgument(format!(
-            "Unknown rack_type: {}. Must be one of: {:?}",
-            rack.rack_type,
-            api.runtime_config
-                .rack_types
-                .rack_types
-                .keys()
-                .collect::<Vec<_>>()
-        ))
-        .into());
-    }
+    // Create the expected rack record.
+    let rack_id = &rack.rack_id;
+    let rack_type = rack.data.rack_type.clone();
     db_expected_rack::create(&mut txn, &rack)
+        .await
+        .map_err(CarbideError::from)?;
+
+    // Create the rack entry with the rack_type name. Expected racks are the
+    // only way rack entries get created.
+    let config = model::rack::RackConfig {
+        rack_type: Some(rack_type),
+        ..Default::default()
+    };
+    db::rack::create(&mut txn, rack_id, &config, Some(&rack.data))
         .await
         .map_err(CarbideError::from)?;
 
@@ -110,10 +117,16 @@ pub async fn update_expected_rack(
         .try_into()
         .map_err(CarbideError::from)?;
 
-    if api.runtime_config.rack_types.get(&rack.rack_type).is_none() {
+    // Validate the rack_type exists in configuration.
+    if api
+        .runtime_config
+        .rack_types
+        .get(&rack.data.rack_type)
+        .is_none()
+    {
         return Err(CarbideError::InvalidArgument(format!(
             "Unknown rack_type: {}. Must be one of: {:?}",
-            rack.rack_type,
+            rack.data.rack_type,
             api.runtime_config
                 .rack_types
                 .rack_types
@@ -192,10 +205,15 @@ pub async fn replace_all_expected_racks(
     for expected_rack in req.expected_racks {
         let rack: ExpectedRack = expected_rack.try_into().map_err(CarbideError::from)?;
 
-        if api.runtime_config.rack_types.get(&rack.rack_type).is_none() {
+        if api
+            .runtime_config
+            .rack_types
+            .get(&rack.data.rack_type)
+            .is_none()
+        {
             return Err(CarbideError::InvalidArgument(format!(
                 "Unknown rack_type: {}",
-                rack.rack_type
+                rack.data.rack_type
             ))
             .into());
         }

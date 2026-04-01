@@ -118,10 +118,10 @@ pub(crate) async fn ensure_rack_exists(
 
             tracing::info!(%rack_id, "Rack does not exist, creating from expected rack");
             let config = model::rack::RackConfig {
-                rack_type: Some(expected.rack_type.clone()),
+                rack_type: Some(expected.data.rack_type.clone()),
                 ..Default::default()
             };
-            let rack = db::rack::create(&mut *txn, rack_id, &config, Some(&expected.metadata))
+            let rack = db::rack::create(&mut *txn, rack_id, &config, Some(&expected.data))
                 .await
                 .map_err(CarbideError::from)?;
 
@@ -671,7 +671,7 @@ impl SiteExplorer {
         );
 
         // Check if a power shelf with the same name already exists
-        if !expected_shelf.metadata.name.is_empty() {
+        if !expected_shelf.data.metadata.name.is_empty() {
             let existing_power_shelves = db_power_shelf::find_by(
                 &mut txn,
                 ObjectColumnFilter::All::<db::power_shelf::NameColumn>,
@@ -680,10 +680,10 @@ impl SiteExplorer {
 
             // Check if any existing power shelf has the same name
             for existing_ps in &existing_power_shelves {
-                if existing_ps.config.name == expected_shelf.metadata.name {
+                if existing_ps.config.name == expected_shelf.data.metadata.name {
                     tracing::info!(
                         "Power shelf with name '{}' already exists, skipping creation for endpoint {}",
-                        &expected_shelf.metadata.name,
+                        &expected_shelf.data.metadata.name,
                         explored_endpoint.address
                     );
                     txn.rollback()
@@ -698,7 +698,7 @@ impl SiteExplorer {
         // Generate power_shelf_id similar to machine_id using deterministic hashing
         // Extract power shelf metadata similar to how machine_id extracts hardware info
         //TODO fetch these from chassis
-        let power_shelf_serial = expected_shelf.metadata.name.as_str();
+        let power_shelf_serial = expected_shelf.data.metadata.name.as_str();
         let power_shelf_vendor = "NVIDIA"; // Default vendor for power shelves
         let power_shelf_model = "PowerShelf"; // Default model identifier
         // TODO: Fetch power shelf location from chassis metadata or configuration
@@ -721,7 +721,7 @@ impl SiteExplorer {
         };
 
         let config = PowerShelfConfig {
-            name: expected_shelf.metadata.name.clone(),
+            name: expected_shelf.data.metadata.name.clone(),
             capacity: Some(100),
             voltage: Some(240),
             location: Some("US/CA/DC/San Jose/1000 N Mathilda Ave".to_string()),
@@ -730,11 +730,10 @@ impl SiteExplorer {
         let new_power_shelf = NewPowerShelf {
             id: power_shelf_id,
             config,
-            metadata: Some(expected_shelf.metadata.clone()),
-            rack_id: expected_shelf.rack_id.clone(),
+            rack_id: expected_shelf.data.rack_id.clone(),
         };
 
-        db_power_shelf::create(&mut txn, &new_power_shelf).await?;
+        db_power_shelf::create(&mut txn, &new_power_shelf, Some(&expected_shelf.data)).await?;
 
         let mac_addresses = report.all_mac_addresses();
         for mac_address in mac_addresses {
@@ -762,7 +761,7 @@ impl SiteExplorer {
             }
         }
 
-        if let Some(ref rack_id) = expected_shelf.rack_id {
+        if let Some(ref rack_id) = expected_shelf.data.rack_id {
             let _ = crate::site_explorer::ensure_rack_exists(txn.as_mut(), rack_id).await?;
         }
         // No need to update the power shelf name again; it was already set in config above.
@@ -778,7 +777,7 @@ impl SiteExplorer {
 
         // Register the power shelf with Rack Manager if RMS client is available
         if let Some(rms_client) = &self.rms_client {
-            if let Some(ref rack_id) = expected_shelf.rack_id {
+            if let Some(ref rack_id) = expected_shelf.data.rack_id {
                 let new_node_info = NewNodeInfo {
                     rack_id: rack_id.to_string(),
                     node_id: power_shelf_id.to_string(),
@@ -1362,14 +1361,14 @@ impl SiteExplorer {
                     .chain(expected_power_shelves.iter().map(|expected_power_shelf| {
                         let fake_ip = self.get_static_ip_for_power_shelf(
                             &expected_power_shelf.bmc_mac_address,
-                            expected_power_shelf.ip_address,
+                            expected_power_shelf.data.ip_address,
                         );
                         // Create a fake machine interface for the power shelf
                         let mut fake_interface = MachineInterfaceSnapshot::mock_with_mac(
                             expected_power_shelf.bmc_mac_address,
                         );
                         fake_interface.hostname =
-                            format!("power-shelf-{}", expected_power_shelf.serial_number);
+                            format!("power-shelf-{}", expected_power_shelf.data.serial_number);
                         fake_interface.segment_id = underlay_segment_id;
                         fake_interface.addresses = vec![fake_ip];
                         fake_interface.network_segment_type = Some(NetworkSegmentType::Underlay);

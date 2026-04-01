@@ -34,11 +34,17 @@ pub struct ExpectedSwitch {
     #[serde(default)]
     pub expected_switch_id: Option<Uuid>,
     pub bmc_mac_address: MacAddress,
-    #[serde(default)]
-    pub nvos_mac_addresses: Vec<MacAddress>,
+    #[serde(flatten)]
+    pub data: ExpectedSwitchData,
+}
+
+#[derive(Default, Debug, Clone, Deserialize)]
+pub struct ExpectedSwitchData {
     pub bmc_username: String,
     pub serial_number: String,
     pub bmc_password: String,
+    #[serde(default)]
+    pub nvos_mac_addresses: Vec<MacAddress>,
     pub nvos_username: Option<String>,
     pub nvos_password: Option<String>,
     #[serde(default = "default_metadata_for_deserializer")]
@@ -55,20 +61,19 @@ impl<'r> FromRow<'r, PgRow> for ExpectedSwitch {
             labels: labels.0,
         };
 
-        let nvos_mac_addresses: Vec<MacAddress> =
-            row.try_get("nvos_mac_addresses").unwrap_or_default();
-
         Ok(ExpectedSwitch {
             expected_switch_id: row.try_get("expected_switch_id")?,
             bmc_mac_address: row.try_get("bmc_mac_address")?,
-            nvos_mac_addresses,
-            bmc_username: row.try_get("bmc_username")?,
-            serial_number: row.try_get("serial_number")?,
-            bmc_password: row.try_get("bmc_password")?,
-            nvos_username: row.try_get("nvos_username")?,
-            nvos_password: row.try_get("nvos_password")?,
-            metadata,
-            rack_id: row.try_get("rack_id")?,
+            data: ExpectedSwitchData {
+                bmc_username: row.try_get("bmc_username")?,
+                serial_number: row.try_get("serial_number")?,
+                bmc_password: row.try_get("bmc_password")?,
+                nvos_mac_addresses: row.try_get("nvos_mac_addresses").unwrap_or_default(),
+                nvos_username: row.try_get("nvos_username")?,
+                nvos_password: row.try_get("nvos_password")?,
+                metadata,
+                rack_id: row.try_get("rack_id")?,
+            },
         })
     }
 }
@@ -83,17 +88,18 @@ impl From<ExpectedSwitch> for rpc::forge::ExpectedSwitch {
                 }),
             bmc_mac_address: expected_switch.bmc_mac_address.to_string(),
             nvos_mac_addresses: expected_switch
+                .data
                 .nvos_mac_addresses
                 .iter()
                 .map(|m| m.to_string())
                 .collect(),
-            bmc_username: expected_switch.bmc_username,
-            bmc_password: expected_switch.bmc_password,
-            switch_serial_number: expected_switch.serial_number,
-            nvos_username: expected_switch.nvos_username,
-            nvos_password: expected_switch.nvos_password,
-            metadata: Some(expected_switch.metadata.into()),
-            rack_id: expected_switch.rack_id,
+            bmc_username: expected_switch.data.bmc_username,
+            bmc_password: expected_switch.data.bmc_password,
+            switch_serial_number: expected_switch.data.serial_number,
+            nvos_username: expected_switch.data.nvos_username,
+            nvos_password: expected_switch.data.nvos_password,
+            metadata: Some(expected_switch.data.metadata.into()),
+            rack_id: expected_switch.data.rack_id,
         }
     }
 }
@@ -124,14 +130,16 @@ impl TryFrom<rpc::forge::ExpectedSwitch> for ExpectedSwitch {
         Ok(ExpectedSwitch {
             expected_switch_id,
             bmc_mac_address,
-            bmc_username: rpc.bmc_username,
-            bmc_password: rpc.bmc_password,
-            serial_number: rpc.switch_serial_number,
-            nvos_username: rpc.nvos_username,
-            nvos_password: rpc.nvos_password,
-            metadata,
-            rack_id: rpc.rack_id,
-            nvos_mac_addresses,
+            data: ExpectedSwitchData {
+                bmc_username: rpc.bmc_username,
+                bmc_password: rpc.bmc_password,
+                serial_number: rpc.switch_serial_number,
+                nvos_mac_addresses,
+                nvos_username: rpc.nvos_username,
+                nvos_password: rpc.nvos_password,
+                metadata,
+                rack_id: rpc.rack_id,
+            },
         })
     }
 }
@@ -192,5 +200,62 @@ impl From<LinkedExpectedSwitch> for rpc::forge::LinkedExpectedSwitch {
             explored_endpoint_address: l.address,
             rack_id: l.rack_id,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that serde(flatten) correctly deserializes a flat JSON
+    /// into the envelope + ExpectedSwitchData structure.
+    #[test]
+    fn deserialize_flat_json_into_envelope_and_data() {
+        let json = r#"{
+            "expected_switch_id": null,
+            "bmc_mac_address": "00:11:22:33:44:55",
+            "nvos_mac_addresses": ["AA:BB:CC:DD:EE:FF"],
+            "bmc_username": "admin",
+            "bmc_password": "secret",
+            "serial_number": "SN-001",
+            "nvos_username": "nvadmin",
+            "nvos_password": "nvsecret",
+            "rack_id": "rack-1"
+        }"#;
+
+        let switch: ExpectedSwitch = serde_json::from_str(json).unwrap();
+
+        // Envelope fields
+        assert_eq!(switch.bmc_mac_address.to_string(), "00:11:22:33:44:55");
+        assert!(switch.expected_switch_id.is_none());
+
+        // Data fields (via flatten)
+        assert_eq!(switch.data.nvos_mac_addresses.len(), 1);
+        assert_eq!(switch.data.bmc_username, "admin");
+        assert_eq!(switch.data.bmc_password, "secret");
+        assert_eq!(switch.data.serial_number, "SN-001");
+        assert_eq!(switch.data.nvos_username, Some("nvadmin".to_string()));
+        assert_eq!(switch.data.nvos_password, Some("nvsecret".to_string()));
+        assert_eq!(switch.data.rack_id.unwrap().to_string(), "rack-1");
+    }
+
+    /// Verify that optional/defaulted fields deserialize correctly
+    /// when omitted from the JSON input.
+    #[test]
+    fn deserialize_minimal_json_uses_defaults() {
+        let json = r#"{
+            "bmc_mac_address": "00:11:22:33:44:55",
+            "bmc_username": "admin",
+            "bmc_password": "secret",
+            "serial_number": "SN-002"
+        }"#;
+
+        let switch: ExpectedSwitch = serde_json::from_str(json).unwrap();
+
+        assert!(switch.data.metadata.name.is_empty());
+        assert!(switch.data.metadata.labels.is_empty());
+        assert!(switch.data.nvos_username.is_none());
+        assert!(switch.data.rack_id.is_none());
+        assert!(switch.data.nvos_mac_addresses.is_empty());
     }
 }

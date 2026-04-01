@@ -17,6 +17,7 @@
 
 use carbide_uuid::switch::SwitchId;
 use db::{DatabaseError, switch as db_switch};
+use model::expected_switch::ExpectedSwitchData;
 use model::metadata::Metadata;
 use model::switch::{NewSwitch, SwitchConfig};
 
@@ -36,11 +37,10 @@ async fn test_switch_metadata_defaults(
             location: None,
         },
         bmc_mac_address: None,
-        metadata: None,
         rack_id: None,
     };
 
-    let switch = db_switch::create(&mut txn, &new_switch).await?;
+    let switch = db_switch::create(&mut txn, &new_switch, None).await?;
 
     // Default metadata: name = switch ID, description empty, no labels
     assert_eq!(switch.metadata.name, switch_id.to_string());
@@ -76,11 +76,21 @@ async fn test_switch_metadata_from_expected(
             location: None,
         },
         bmc_mac_address: None,
-        metadata: Some(expected_metadata),
         rack_id: None,
     };
 
-    let switch = db_switch::create(&mut txn, &new_switch).await?;
+    let expected_data = ExpectedSwitchData {
+        bmc_username: String::new(),
+        bmc_password: String::new(),
+        serial_number: String::new(),
+        nvos_mac_addresses: vec![],
+        nvos_username: None,
+        nvos_password: None,
+        metadata: expected_metadata,
+        rack_id: None,
+    };
+
+    let switch = db_switch::create(&mut txn, &new_switch, Some(&expected_data)).await?;
 
     assert_eq!(switch.metadata.name, "My Switch");
     assert_eq!(switch.metadata.description, "Top-of-rack switch");
@@ -104,11 +114,10 @@ async fn test_switch_metadata_update(pool: sqlx::PgPool) -> Result<(), Box<dyn s
             location: None,
         },
         bmc_mac_address: None,
-        metadata: None,
         rack_id: None,
     };
 
-    let switch = db_switch::create(&mut txn, &new_switch).await?;
+    let switch = db_switch::create(&mut txn, &new_switch, None).await?;
     let version1 = switch.version;
 
     let new_metadata = Metadata {
@@ -156,11 +165,10 @@ async fn test_switch_metadata_version_conflict(
             location: None,
         },
         bmc_mac_address: None,
-        metadata: None,
         rack_id: None,
     };
 
-    let switch = db_switch::create(&mut txn, &new_switch).await?;
+    let switch = db_switch::create(&mut txn, &new_switch, None).await?;
     let version1 = switch.version;
 
     let metadata = Metadata {

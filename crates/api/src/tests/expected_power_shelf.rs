@@ -21,7 +21,7 @@ use common::api_fixtures::create_test_env;
 use common::api_fixtures::site_explorer::create_expected_power_shelves;
 use db::DatabaseError;
 use mac_address::MacAddress;
-use model::expected_power_shelf::ExpectedPowerShelf;
+use model::expected_power_shelf::{ExpectedPowerShelf, ExpectedPowerShelfData};
 use model::metadata::Metadata;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{ExpectedPowerShelfList, ExpectedPowerShelfRequest};
@@ -37,7 +37,7 @@ async fn test_lookup_by_mac(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
         .expect("unable to create transaction on database pool");
     let shelves = create_expected_power_shelves(&mut txn).await;
 
-    assert_eq!(shelves[0].serial_number, "PS-SN-001");
+    assert_eq!(shelves[0].data.serial_number, "PS-SN-001");
     Ok(())
 }
 
@@ -56,12 +56,14 @@ async fn test_duplicate_fail_create(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         ExpectedPowerShelf {
             expected_power_shelf_id: None,
             bmc_mac_address: power_shelf.bmc_mac_address,
-            bmc_username: "ADMIN3".into(),
-            bmc_password: "hmm".into(),
-            serial_number: "DUPLICATE".into(),
-            ip_address: None,
-            metadata: Metadata::default(),
-            rack_id: None,
+            data: ExpectedPowerShelfData {
+                bmc_username: "ADMIN3".into(),
+                bmc_password: "hmm".into(),
+                serial_number: "DUPLICATE".into(),
+                ip_address: None,
+                metadata: Metadata::default(),
+                rack_id: None,
+            },
         },
     )
     .await;
@@ -83,12 +85,12 @@ async fn test_update_bmc_credentials(pool: sqlx::PgPool) -> Result<(), Box<dyn s
     let shelves = create_expected_power_shelves(&mut txn).await;
     let mut power_shelf = shelves[0].clone();
 
-    assert_eq!(power_shelf.serial_number, "PS-SN-001");
-    assert_eq!(power_shelf.bmc_username, "ADMIN");
-    assert_eq!(power_shelf.bmc_password, "Pwd2023x0x0x0x0x7");
+    assert_eq!(power_shelf.data.serial_number, "PS-SN-001");
+    assert_eq!(power_shelf.data.bmc_username, "ADMIN");
+    assert_eq!(power_shelf.data.bmc_password, "Pwd2023x0x0x0x0x7");
 
-    power_shelf.bmc_username = "ADMIN2".to_string();
-    power_shelf.bmc_password = "wysiwyg".to_string();
+    power_shelf.data.bmc_username = "ADMIN2".to_string();
+    power_shelf.data.bmc_password = "wysiwyg".to_string();
     db::expected_power_shelf::update(&mut txn, &power_shelf)
         .await
         .expect("Error updating bmc username/password");
@@ -106,8 +108,8 @@ async fn test_update_bmc_credentials(pool: sqlx::PgPool) -> Result<(), Box<dyn s
             .unwrap()
             .expect("Expected power shelf not found");
 
-    assert_eq!(power_shelf.bmc_username, "ADMIN2");
-    assert_eq!(power_shelf.bmc_password, "wysiwyg");
+    assert_eq!(power_shelf.data.bmc_username, "ADMIN2");
+    assert_eq!(power_shelf.data.bmc_password, "wysiwyg");
 
     Ok(())
 }
@@ -121,7 +123,7 @@ async fn test_delete(pool: sqlx::PgPool) -> () {
     let shelves = create_expected_power_shelves(&mut txn).await;
     let power_shelf = &shelves[0];
 
-    assert_eq!(power_shelf.serial_number, "PS-SN-001");
+    assert_eq!(power_shelf.data.serial_number, "PS-SN-001");
 
     db::expected_power_shelf::delete_by_mac(&mut txn, power_shelf.bmc_mac_address)
         .await
@@ -606,11 +608,11 @@ async fn test_with_ip_addresses(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
 
     // Shelves at indices 3 and 4 are created with IP addresses
     assert_eq!(
-        shelves[3].ip_address,
+        shelves[3].data.ip_address,
         Some("192.168.1.100".parse().unwrap())
     );
     assert_eq!(
-        shelves[4].ip_address,
+        shelves[4].data.ip_address,
         Some("192.168.1.101".parse().unwrap())
     );
 

@@ -183,7 +183,7 @@ impl ExploredEndpointIndexBuilder {
             tracing::info!(
                 "expected_power_shelf from DB: {} {}",
                 shelf.bmc_mac_address,
-                shelf.metadata.name
+                shelf.data.metadata.name
             );
             if let Some(iface) = self
                 .explored_underlay_interfaces
@@ -211,7 +211,7 @@ impl ExploredEndpointIndexBuilder {
             tracing::info!(
                 "expected_switch from DB: {} {}",
                 switch.bmc_mac_address,
-                switch.metadata.name
+                switch.data.metadata.name
             );
             if let Some(iface) = self
                 .explored_underlay_interfaces

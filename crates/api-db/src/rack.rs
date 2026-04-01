@@ -19,6 +19,7 @@ use carbide_uuid::rack::RackId;
 use config_version::ConfigVersion;
 use health_report::{HealthReport, OverrideMode};
 use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::expected_rack::ExpectedRackData;
 use model::metadata::Metadata;
 use model::rack::{FirmwareUpgradeJob, Rack, RackConfig, RackState};
 use sqlx::PgConnection;
@@ -93,12 +94,14 @@ pub async fn create(
     txn: &mut PgConnection,
     rack_id: &RackId,
     config: &RackConfig,
-    expected_metadata: Option<&Metadata>,
+    expected_data: Option<&ExpectedRackData>,
 ) -> DatabaseResult<Rack> {
     let controller_state = String::from("{\"state\":\"created\"}");
     let controller_state_outcome = String::from("{}");
     let default_metadata = Metadata::default();
-    let src_metadata = expected_metadata.unwrap_or(&default_metadata);
+    let src_metadata = expected_data
+        .map(|d| &d.metadata)
+        .unwrap_or(&default_metadata);
     let name = match src_metadata.name.as_str() {
         "" => rack_id.to_string(),
         name => name.to_string(),

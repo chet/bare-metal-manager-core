@@ -244,19 +244,19 @@ impl BmcEndpointExplorer {
             };
         } else if let Some(expected_power_shelf_credentials) = expected_power_shelf {
             tracing::info!(%bmc_ip_address, %bmc_mac_address, "Found an expected power shelf for this BMC mac address");
-            sitewide_bmc_password = expected_power_shelf_credentials.bmc_password.clone();
+            sitewide_bmc_password = expected_power_shelf_credentials.data.bmc_password.clone();
             // Lite-On power shelf BMCs do not support the Redfish service root endpoint
             // so we skip the password change
             skip_password_change = true;
             current_bmc_credentials = Credentials::UsernamePassword {
-                username: expected_power_shelf_credentials.bmc_username.clone(),
-                password: expected_power_shelf_credentials.bmc_password.clone(),
+                username: expected_power_shelf_credentials.data.bmc_username.clone(),
+                password: expected_power_shelf_credentials.data.bmc_password.clone(),
             };
         } else if let Some(expected_switch_credentials) = expected_switch {
             tracing::info!(%bmc_ip_address, %bmc_mac_address, "Found an expected switch for this BMC mac address");
             current_bmc_credentials = Credentials::UsernamePassword {
-                username: expected_switch_credentials.bmc_username.clone(),
-                password: expected_switch_credentials.bmc_password.clone(),
+                username: expected_switch_credentials.data.bmc_username.clone(),
+                password: expected_switch_credentials.data.bmc_password.clone(),
             };
         } else {
             tracing::info!(%bmc_ip_address, %bmc_mac_address, %vendor, "No expected machine found, could be a BlueField");
@@ -314,8 +314,8 @@ impl BmcEndpointExplorer {
         expected_switch: &ExpectedSwitch,
     ) -> Result<(), EndpointExplorationError> {
         if let (Some(nvos_username), Some(nvos_password)) = (
-            expected_switch.nvos_username.as_ref(),
-            expected_switch.nvos_password.as_ref(),
+            expected_switch.data.nvos_username.as_ref(),
+            expected_switch.data.nvos_password.as_ref(),
         ) {
             tracing::info!(
                 %bmc_mac_address,
@@ -803,8 +803,8 @@ impl EndpointExplorer for BmcEndpointExplorer {
 
         // Check for switch NVOS admin credentials if this is a switch
         if let Some(expected_switch) = expected_switch
-            && expected_switch.nvos_username.is_some()
-            && expected_switch.nvos_password.is_some()
+            && expected_switch.data.nvos_username.is_some()
+            && expected_switch.data.nvos_password.is_some()
         {
             // Only check if rotation is enabled
             if self.rotate_switch_nvos_credentials.load(Ordering::Relaxed) {

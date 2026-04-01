@@ -39,7 +39,6 @@ pub mod slas;
 pub struct NewPowerShelf {
     pub id: PowerShelfId,
     pub config: PowerShelfConfig,
-    pub metadata: Option<Metadata>,
     pub rack_id: Option<RackId>,
 }
 
@@ -60,7 +59,6 @@ impl TryFrom<rpc::PowerShelfCreationRequest> for NewPowerShelf {
         Ok(NewPowerShelf {
             id,
             config: PowerShelfConfig::try_from(conf)?,
-            metadata: None,
             rack_id: None,
         })
     }

@@ -40,7 +40,6 @@ pub struct NewSwitch {
     pub id: SwitchId,
     pub config: SwitchConfig,
     pub bmc_mac_address: Option<MacAddress>,
-    pub metadata: Option<Metadata>,
     pub rack_id: Option<RackId>,
 }
 
@@ -75,7 +74,6 @@ impl TryFrom<rpc::SwitchCreationRequest> for NewSwitch {
             id,
             config: SwitchConfig::try_from(conf)?,
             bmc_mac_address: None,
-            metadata: None,
             rack_id: None,
         })
     }

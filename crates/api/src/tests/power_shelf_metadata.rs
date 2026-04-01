@@ -18,6 +18,7 @@
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use db::{DatabaseError, power_shelf as db_power_shelf};
+use model::expected_power_shelf::ExpectedPowerShelfData;
 use model::metadata::Metadata;
 use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
 
@@ -37,10 +38,9 @@ async fn test_power_shelf_metadata_defaults(
             voltage: Some(240),
             location: None,
         },
-        metadata: None,
     };
 
-    let ps = db_power_shelf::create(&mut txn, &new_ps).await?;
+    let ps = db_power_shelf::create(&mut txn, &new_ps, None).await?;
 
     // Default metadata: name = power shelf ID, description empty, no labels
     assert_eq!(ps.metadata.name, ps_id.to_string());
@@ -76,10 +76,18 @@ async fn test_power_shelf_metadata_from_expected(
             voltage: Some(240),
             location: None,
         },
-        metadata: Some(expected_metadata),
     };
 
-    let ps = db_power_shelf::create(&mut txn, &new_ps).await?;
+    let expected_data = ExpectedPowerShelfData {
+        bmc_username: String::new(),
+        bmc_password: String::new(),
+        serial_number: String::new(),
+        ip_address: None,
+        metadata: expected_metadata,
+        rack_id: None,
+    };
+
+    let ps = db_power_shelf::create(&mut txn, &new_ps, Some(&expected_data)).await?;
 
     assert_eq!(ps.metadata.name, "My Power Shelf");
     assert_eq!(ps.metadata.description, "48V power shelf");
@@ -105,10 +113,9 @@ async fn test_power_shelf_metadata_update(
             voltage: Some(240),
             location: None,
         },
-        metadata: None,
     };
 
-    let ps = db_power_shelf::create(&mut txn, &new_ps).await?;
+    let ps = db_power_shelf::create(&mut txn, &new_ps, None).await?;
     let version1 = ps.version;
 
     let new_metadata = Metadata {
@@ -156,10 +163,9 @@ async fn test_power_shelf_metadata_version_conflict(
             voltage: Some(240),
             location: None,
         },
-        metadata: None,
     };
 
-    let ps = db_power_shelf::create(&mut txn, &new_ps).await?;
+    let ps = db_power_shelf::create(&mut txn, &new_ps, None).await?;
     let version1 = ps.version;
 
     let metadata = Metadata {
