@@ -32,6 +32,29 @@ use tonic::Status;
 
 use crate::CarbideError;
 
+// How many buffered messages a log-stream flow can hold before the connection
+// router starts dropping lines for a viewer that has fallen behind.
+const STREAM_FLOW_CAPACITY: usize = 1024;
+
+// Flow is a registered request flow over a scout connection, keyed by flow_uuid.
+enum Flow {
+    // Oneshot is a single request/response: removed from the flow table once its
+    // one response has been delivered.
+    Oneshot(oneshot::Sender<ScoutStreamApiBoundMessage>),
+    // Stream is a long-lived, multi-response flow (e.g. log streaming): it stays
+    // registered, receiving every message tagged with its flow_uuid, until it is
+    // explicitly closed (or its receiver is dropped).
+    Stream(mpsc::Sender<ScoutStreamApiBoundMessage>),
+}
+
+// FlowRoute is how the connection router should deliver one response, decided
+// while briefly holding the flow-table lock and then acted on without it.
+enum FlowRoute {
+    Oneshot,
+    Stream(mpsc::Sender<ScoutStreamApiBoundMessage>),
+    Unknown,
+}
+
 // AgentConnection represents an active streaming connection to
 // a scout agent. It contains the corresponding machine_id, the
 // channels used to pass messages, and any additional metadata
@@ -47,7 +70,7 @@ struct AgentConnection {
     tx: mpsc::Sender<Result<ScoutStreamScoutBoundMessage, Status>>,
     // rx is the receiver for getting responses from the scout agent.
     rx: Arc<RwLock<mpsc::Receiver<ScoutStreamApiBoundMessage>>>,
-    flows: Arc<RwLock<HashMap<uuid::Uuid, oneshot::Sender<ScoutStreamApiBoundMessage>>>>,
+    flows: Arc<RwLock<HashMap<uuid::Uuid, Flow>>>,
 }
 
 // ConnectionRegistry is the interface for working with active
@@ -110,18 +133,46 @@ impl ConnectionRegistry {
                     Err(_) => continue,
                 };
 
-                // Route response to the waiting flow.
+                // Route the response to its flow. Oneshot flows are removed once
+                // their single response is delivered; stream flows stay
+                // registered and receive every message until closed. Decide the
+                // route while holding the lock, then act (cloning the stream
+                // sender so we never send while borrowing the table).
                 let mut flows = connection_flows.write().await;
-                if let Some(sender) = flows.remove(&flow_uuid) {
-                    if let Err(send_err) = sender.send(response) {
+                let route = match flows.get(&flow_uuid) {
+                    Some(Flow::Oneshot(_)) => FlowRoute::Oneshot,
+                    Some(Flow::Stream(sender)) => FlowRoute::Stream(sender.clone()),
+                    None => FlowRoute::Unknown,
+                };
+                match route {
+                    FlowRoute::Oneshot => {
+                        if let Some(Flow::Oneshot(sender)) = flows.remove(&flow_uuid)
+                            && let Err(send_err) = sender.send(response)
+                        {
+                            tracing::warn!(
+                                "error relaying flow response (machine_id={machine_id}, flow_uuid={flow_uuid}): {send_err:?}"
+                            );
+                        }
+                    }
+                    FlowRoute::Stream(sender) => match sender.try_send(response) {
+                        Ok(()) => {}
+                        // Viewer fell behind: drop this line rather than stall the
+                        // shared router (it serves every flow on this connection).
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            tracing::warn!(
+                                "scout log stream lagging, dropping line (machine_id={machine_id}, flow_uuid={flow_uuid})"
+                            );
+                        }
+                        // Receiver gone (viewer disconnected): drop the flow.
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            flows.remove(&flow_uuid);
+                        }
+                    },
+                    FlowRoute::Unknown => {
                         tracing::warn!(
-                            "error relaying flow response (machine_id={machine_id}, flow_uuid={flow_uuid}): {send_err:?}"
+                            "dropping flow response for unknown flow_uuid (machine_id={machine_id}, flow_uuid={flow_uuid}): {response:?}"
                         );
                     }
-                } else {
-                    tracing::warn!(
-                        "dropping flow response for unknown flow_uuid (machine_id={machine_id}, flow_uuid={flow_uuid}): {response:?}"
-                    );
                 }
             }
         });
@@ -151,26 +202,7 @@ impl ConnectionRegistry {
         machine_id: MachineId,
         request: ScoutStreamScoutBoundMessage,
     ) -> Result<ScoutStreamApiBoundMessage, Status> {
-        let Some(flow_uuid_pb) = request.flow_uuid.as_ref() else {
-            return Err(CarbideError::Internal {
-                message: format!(
-                    "flow_uuid empty for flow with {machine_id}, unable to build flow",
-                ),
-            }
-            .into());
-        };
-
-        let flow_uuid: uuid::Uuid = match flow_uuid_pb.clone().try_into() {
-            Ok(flow_uuid) => flow_uuid,
-            Err(e) => {
-                return Err(CarbideError::Internal {
-                    message: format!(
-                        "failed to decode flow_uuid (machine_id={machine_id}): {flow_uuid_pb:?}: {e:?}",
-                    ),
-                }
-                .into());
-            }
-        };
+        let flow_uuid = decode_request_flow_uuid(&request, machine_id)?;
 
         let (connection_tx, connection_flows) = {
             let connections = self.connections.read().await;
@@ -194,7 +226,7 @@ impl ConnectionRegistry {
         let (response_tx, response_rx) = oneshot::channel();
         {
             let mut flows = connection_flows.write().await;
-            flows.insert(flow_uuid, response_tx);
+            flows.insert(flow_uuid, Flow::Oneshot(response_tx));
         }
 
         // And now the request to the scout agent.
@@ -218,6 +250,80 @@ impl ConnectionRegistry {
             }
             .into()
         })
+    }
+
+    // open_stream_flow registers a long-lived, multi-response flow for the
+    // scout-bound `request`, sends it, and returns the flow_uuid plus the
+    // receiver the caller drains. Used for log streaming; the caller must call
+    // `close_stream_flow` with the returned flow_uuid when finished.
+    pub async fn open_stream_flow(
+        &self,
+        machine_id: MachineId,
+        request: ScoutStreamScoutBoundMessage,
+    ) -> Result<(uuid::Uuid, mpsc::Receiver<ScoutStreamApiBoundMessage>), Status> {
+        let flow_uuid = decode_request_flow_uuid(&request, machine_id)?;
+
+        let (connection_tx, connection_flows) = {
+            let connections = self.connections.read().await;
+            let connection =
+                connections
+                    .get(&machine_id)
+                    .ok_or_else(|| CarbideError::NotFoundError {
+                        kind: "scout stream connection",
+                        id: machine_id.to_string(),
+                    })?;
+            (connection.tx.clone(), Arc::clone(&connection.flows))
+        };
+
+        let (response_tx, response_rx) = mpsc::channel(STREAM_FLOW_CAPACITY);
+        {
+            let mut flows = connection_flows.write().await;
+            flows.insert(flow_uuid, Flow::Stream(response_tx));
+        }
+
+        tracing::info!(
+            "opening stream flow to scout agent (machine_id={machine_id}, flow_uuid={flow_uuid})"
+        );
+
+        if let Err(e) = connection_tx.send(Ok(request)).await {
+            // Roll back the flow we just registered if the request can't be sent.
+            connection_flows.write().await.remove(&flow_uuid);
+            return Err(CarbideError::Internal {
+                message: format!(
+                    "failed to send stream request to scout agent (machine_id={machine_id}, flow_uuid={flow_uuid}): {e}"
+                ),
+            }
+            .into());
+        }
+
+        Ok((flow_uuid, response_rx))
+    }
+
+    // close_stream_flow removes a stream flow opened by `open_stream_flow` and
+    // sends `stop_request` to the scout agent so it stops relaying. Best effort:
+    // if the connection is already gone, the flow is gone with it.
+    pub async fn close_stream_flow(
+        &self,
+        machine_id: MachineId,
+        flow_uuid: uuid::Uuid,
+        stop_request: ScoutStreamScoutBoundMessage,
+    ) {
+        let Some((connection_tx, connection_flows)) = ({
+            let connections = self.connections.read().await;
+            connections
+                .get(&machine_id)
+                .map(|c| (c.tx.clone(), Arc::clone(&c.flows)))
+        }) else {
+            return;
+        };
+
+        connection_flows.write().await.remove(&flow_uuid);
+
+        tracing::info!(
+            "closing stream flow to scout agent (machine_id={machine_id}, flow_uuid={flow_uuid})"
+        );
+        // Best effort: the connection may already be closing.
+        let _ = connection_tx.send(Ok(stop_request)).await;
     }
 
     // is_connected checks if a machine is currently connected.
@@ -255,5 +361,29 @@ fn extract_flow_uuid(
         tracing::warn!(
             "failed to decode flow_uuid (machine_id={machine_id}): {flow_uuid_pb:?}: {e:?}"
         );
+    })
+}
+
+// decode_request_flow_uuid extracts and decodes the flow_uuid that a scout-bound
+// request must carry, returning a gRPC-style error if it is missing or
+// malformed.
+fn decode_request_flow_uuid(
+    request: &ScoutStreamScoutBoundMessage,
+    machine_id: MachineId,
+) -> Result<uuid::Uuid, Status> {
+    let Some(flow_uuid_pb) = request.flow_uuid.as_ref() else {
+        return Err(CarbideError::Internal {
+            message: format!("flow_uuid empty for flow with {machine_id}, unable to build flow"),
+        }
+        .into());
+    };
+
+    flow_uuid_pb.clone().try_into().map_err(|e| {
+        CarbideError::Internal {
+            message: format!(
+                "failed to decode flow_uuid (machine_id={machine_id}): {flow_uuid_pb:?}: {e:?}"
+            ),
+        }
+        .into()
     })
 }

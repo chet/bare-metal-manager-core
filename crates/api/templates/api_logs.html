@@ -15,6 +15,9 @@
   }
   .log-source-bar button.active { background: #2d6cdf; color: #fff; border-color: #2d6cdf; }
   .log-source-bar button:disabled { background: #d0d0d0; color: #555; cursor: not-allowed; }
+  .log-machine-bar { display: flex; gap: .5rem; align-items: center; margin: .25rem 0 .5rem; flex-wrap: wrap; }
+  .log-machine-bar button { padding: .2rem .6rem; border: 1px solid #ccc; background: #f4f4f4; cursor: pointer; border-radius: 4px; font: inherit; }
+  #log-machine-status { color: #888; font-size: .85em; }
   .log-toolbar { display: flex; gap: .6rem; align-items: center; margin: .5rem 0; flex-wrap: wrap; }
   .log-toolbar input[type=search] { min-width: 18rem; }
   #log-status { margin-left: auto; color: #888; font-size: .85em; }
@@ -47,9 +50,18 @@
 {% block content %}
 <h2>Logs</h2>
 <div class="log-source-bar" role="tablist">
-  <button type="button" class="active" aria-selected="true">API</button>
-  <button type="button" disabled title="Host (Scout)">Scout</button>
-  <button type="button" disabled title="DPU Agent">DPU</button>
+  <button type="button" class="active" data-source="api" aria-selected="true">API</button>
+  <button type="button" data-source="scout" aria-selected="false" title="Host (Scout)">Scout</button>
+  <button type="button" disabled title="DPU Agent (coming soon)">DPU</button>
+</div>
+<div class="log-machine-bar" id="log-machine-bar" style="display:none;">
+  <label>Machine
+    <select id="log-machine-picker">
+      <option value="">— select a connected scout —</option>
+    </select>
+  </label>
+  <button type="button" id="log-machine-refresh" title="Refresh connection list">↻ Refresh</button>
+  <span id="log-machine-status"></span>
 </div>
 <div class="log-toolbar">
   <label>Level
@@ -81,6 +93,17 @@
   const clearBtn = document.getElementById('log-clear');
   const statusEl = document.getElementById('log-status');
   const showSpans = document.getElementById('log-show-spans');
+  const sourceBtns = document.querySelectorAll('.log-source-bar button[data-source]');
+  const machineBar = document.getElementById('log-machine-bar');
+  const machinePicker = document.getElementById('log-machine-picker');
+  const machineRefresh = document.getElementById('log-machine-refresh');
+  const machineStatus = document.getElementById('log-machine-status');
+
+  // Which log source is being viewed, and (for scout) which machine. `es` is the
+  // current EventSource, swapped out by connect() when the source/machine change.
+  let currentSource = 'api';
+  let currentMachine = '';
+  let es = null;
 
   const RANK = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 };
   const MAX_ROWS = 5000;
@@ -196,7 +219,7 @@
     // in-flight momentum/inertial scroll (the runaway's root cause), so when we
     // restore it below, our prepended position sticks instead of being overridden.
     out.style.overflowY = 'hidden';
-    fetch('/admin/logs/api/history?before=' + encodeURIComponent(top.dataset.seq))
+    fetch(historyUrl(top.dataset.seq))
       .then(function (r) { return r.ok ? r.json() : []; })
       .then(function (lines) {
         if (!lines.length) { reachedStart = true; return; }
@@ -246,13 +269,107 @@
   });
   clearBtn.addEventListener('click', function () { out.replaceChildren(); reachedStart = false; });
 
-  const es = new EventSource('/admin/logs/api/stream');
-  es.onopen = function () { statusEl.textContent = 'streaming'; };
-  es.onmessage = function (e) {
-    try { addLine(JSON.parse(e.data)); } catch (_) { /* ignore malformed payload */ }
-  };
-  es.addEventListener('lag', function (e) { addLag(e.data); });
-  es.onerror = function () { statusEl.textContent = 'reconnecting…'; };
+  // --- Source + connection management ---
+
+  // Build the SSE URL for the current source/machine.
+  function streamUrl() {
+    if (currentSource === 'scout') {
+      return '/admin/logs/scout/stream?machine_id=' + encodeURIComponent(currentMachine);
+    }
+    return '/admin/logs/' + currentSource + '/stream';
+  }
+
+  // Build the scrollback URL for the current source. Scout has no history
+  // endpoint in v1 (it's live-tail + replay only), so the fetch 404s and
+  // scrollback simply stops — handled gracefully by loadOlder().
+  function historyUrl(beforeSeq) {
+    let url = '/admin/logs/' + currentSource + '/history?before=' + encodeURIComponent(beforeSeq);
+    if (currentSource === 'scout' && currentMachine) {
+      url += '&machine_id=' + encodeURIComponent(currentMachine);
+    }
+    return url;
+  }
+
+  // (Re)open the stream for the current source/machine: tear down the old
+  // EventSource, clear the viewer, and reset scrollback state.
+  function connect() {
+    if (es) { es.close(); es = null; }
+    out.replaceChildren();
+    reachedStart = false;
+    loadingOlder = false;
+    armed = true;
+
+    if (currentSource === 'scout' && !currentMachine) {
+      statusEl.textContent = 'select a machine';
+      return;
+    }
+
+    statusEl.textContent = 'connecting…';
+    es = new EventSource(streamUrl());
+    es.onopen = function () { statusEl.textContent = 'streaming'; };
+    es.onmessage = function (e) {
+      try { addLine(JSON.parse(e.data)); } catch (_) { /* ignore malformed payload */ }
+    };
+    es.addEventListener('lag', function (e) { addLag(e.data); });
+    es.onerror = function () { statusEl.textContent = 'reconnecting…'; };
+  }
+
+  // Populate the scout machine picker from the connections endpoint, preserving
+  // the current selection if it's still connected.
+  function loadMachines() {
+    machineStatus.textContent = 'loading…';
+    fetch('/admin/logs/scout/connections')
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (machines) {
+        const previous = currentMachine;
+        machinePicker.replaceChildren();
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = machines.length
+          ? '— select a connected scout —'
+          : '— no connected scouts —';
+        machinePicker.appendChild(placeholder);
+        machines.forEach(function (m) {
+          const opt = document.createElement('option');
+          opt.value = m.machine_id;
+          opt.textContent = m.machine_id + ' (up ' + m.uptime_seconds + 's)';
+          machinePicker.appendChild(opt);
+        });
+        if (previous && machines.some(function (m) { return m.machine_id === previous; })) {
+          machinePicker.value = previous;
+        }
+        machineStatus.textContent = machines.length + ' connected';
+      })
+      .catch(function () { machineStatus.textContent = 'failed to load'; });
+  }
+
+  sourceBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      sourceBtns.forEach(function (b) {
+        const active = b === btn;
+        b.classList.toggle('active', active);
+        b.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      currentSource = btn.dataset.source;
+      if (currentSource === 'scout') {
+        machineBar.style.display = '';
+        currentMachine = '';
+        loadMachines();
+        connect(); // shows "select a machine" until one is chosen
+      } else {
+        machineBar.style.display = 'none';
+        connect();
+      }
+    });
+  });
+
+  machinePicker.addEventListener('change', function () {
+    currentMachine = machinePicker.value;
+    connect();
+  });
+  machineRefresh.addEventListener('click', loadMachines);
+
+  connect();
 })();
 {% endraw %}
 {% endblock %}

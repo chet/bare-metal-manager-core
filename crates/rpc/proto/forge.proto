@@ -7706,6 +7706,7 @@ message ScoutStreamApiBoundMessage {
     mlx_device.MlxDeviceConfigSyncResponse mlx_device_config_sync_response = 12;
     mlx_device.MlxDeviceConfigCompareResponse mlx_device_config_compare_response = 13;
     ScoutStreamAgentPingResponse scout_stream_agent_ping_response = 14;
+    ScoutStreamLogLine log_line = 15;
   }
 }
 
@@ -7735,6 +7736,8 @@ message ScoutStreamScoutBoundMessage {
     mlx_device.MlxDeviceConfigSyncRequest mlx_device_config_sync_request = 13;
     mlx_device.MlxDeviceConfigCompareRequest mlx_device_config_compare_request = 14;
     ScoutStreamAgentPingRequest scout_stream_agent_ping_request = 15;
+    ScoutStreamStartLogStreamRequest start_log_stream_request = 16;
+    ScoutStreamStopLogStreamRequest stop_log_stream_request = 17;
   }
 }
 
@@ -7820,6 +7823,53 @@ message ScoutStreamError {
 // with troubleshooting and debugging.
 enum ScoutStreamErrorStatus {
   SCOUT_STREAM_ERROR_STATUS_INTERNAL = 0;
+}
+
+// --- ScoutStream log streaming ---
+// Unlike the oneshot request/response flows above, a log-stream flow is
+// long-lived and multi-response: carbide-api opens it with a
+// ScoutStreamStartLogStreamRequest, the scout agent then sends a stream of
+// ScoutStreamLogLine messages (all sharing the request's flow_uuid) until
+// carbide-api sends a ScoutStreamStopLogStreamRequest on the same flow (or the
+// underlying ScoutStream connection drops). This powers the live Scout log view
+// in the admin web UI.
+
+// ScoutStreamStartLogStreamRequest asks the scout agent to begin tailing its own
+// tracing logs back over the stream. The agent replays its recent buffered lines
+// and then streams live ones, using its own configured buffer/replay settings.
+// Empty for now: level/text filtering is done in the viewer, mirroring how the
+// carbide-api log source works.
+message ScoutStreamStartLogStreamRequest {
+}
+
+// ScoutStreamStopLogStreamRequest asks the scout agent to stop the log-stream
+// flow identified by this message's flow_uuid. Sent when the viewer disconnects.
+message ScoutStreamStopLogStreamRequest {
+}
+
+// ScoutStreamLogLine is a single structured log line tailed from the scout
+// agent's tracing output. Fields mirror the in-process LogLine that the admin
+// web UI already renders for carbide-api's own logs, so the same viewer renders
+// both.
+message ScoutStreamLogLine {
+  // Monotonic per-process sequence number from the scout agent, used as the
+  // scrollback cursor in the viewer.
+  uint64 seq = 1;
+  // RFC 3339 timestamp captured when the line was observed.
+  string timestamp = 2;
+  // Log level: one of TRACE/DEBUG/INFO/WARN/ERROR, or SPAN for a span-completion
+  // summary.
+  string level = 3;
+  // Event target (module path / target string).
+  string target = 4;
+  // The event message, or the span name for a SPAN line.
+  string message = 5;
+  // Remaining structured key/value fields.
+  map<string, string> fields = 6;
+  // Source location "file:line", if available.
+  optional string location = 7;
+  // span_id of the enclosing span, when present.
+  optional string span_id = 8;
 }
 
 // Entries used for prefix-list policies on the DPUS.

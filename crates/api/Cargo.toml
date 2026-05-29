@@ -45,6 +45,7 @@ carbide-ib-partition-controller = { path = "../ib-partition-controller" }
 carbide-ipmi = { path = "../ipmi" }
 carbide-ipxe-renderer = { path = "../ipxe-renderer" }
 carbide-libmlx = { path = "../libmlx" }
+carbide-log-stream = { path = "../log-stream" }
 carbide-machine-controller = { path = "../machine-controller" }
 carbide-measured-boot = { path = "../measured-boot", features = ["sqlx"] }
 carbide-metrics-utils = { path = "../metrics-utils" }

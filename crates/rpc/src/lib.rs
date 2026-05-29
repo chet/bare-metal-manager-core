@@ -788,6 +788,19 @@ impl forge::ScoutStreamScoutBoundMessage {
             payload: Some(msg),
         }
     }
+
+    /// Build a scout-bound message on an existing `flow_uuid` (rather than
+    /// minting a new one), to address a follow-up message — e.g. a
+    /// StopLogStream — to an already-open flow.
+    pub fn from_flow(
+        flow_uuid: uuid::Uuid,
+        msg: forge::scout_stream_scout_bound_message::Payload,
+    ) -> Self {
+        Self {
+            flow_uuid: Some(flow_uuid.into()),
+            payload: Some(msg),
+        }
+    }
 }
 
 impl forge::ScoutStreamApiBoundMessage {

@@ -1180,6 +1180,7 @@ dependencies = [
  "carbide-ipmi",
  "carbide-ipxe-renderer",
  "carbide-libmlx",
+ "carbide-log-stream",
  "carbide-machine-controller",
  "carbide-macros",
  "carbide-measured-boot",
@@ -1923,6 +1924,7 @@ dependencies = [
  "base64",
  "carbide-dpu-agent-utils",
  "carbide-libmlx",
+ "carbide-log-stream",
  "carbide-rpc",
  "carbide-rpc-utils",
  "carbide-tls",
@@ -2133,6 +2135,17 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tonic",
+]
+
+[[package]]
+name = "carbide-log-stream"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2642,6 +2655,7 @@ dependencies = [
  "axum",
  "carbide-host-support",
  "carbide-libmlx",
+ "carbide-log-stream",
  "carbide-machine-validation",
  "carbide-rpc",
  "carbide-tls",

@@ -108,6 +108,20 @@ pub(crate) struct Options {
     )]
     pub tpm_path: String,
 
+    #[clap(
+        long,
+        help = "In-memory budget (MiB) for the rolling log buffer streamed to the carbide-api admin log viewer",
+        default_value_t = 64usize
+    )]
+    pub log_buffer_megabytes: usize,
+
+    #[clap(
+        long,
+        help = "Number of recent buffered log lines replayed when the admin log viewer connects",
+        default_value_t = 500usize
+    )]
+    pub log_replay_lines: usize,
+
     #[clap(subcommand)]
     pub subcmd: Option<Command>,
 }

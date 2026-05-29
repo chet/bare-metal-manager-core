@@ -95,12 +95,14 @@ async fn main() -> Result<(), eyre::Report> {
 
     check_if_running_in_qemu().await;
 
-    carbide_host_support::init_logging()?;
+    let log_stream = carbide_host_support::init_logging_with_log_stream(
+        config.log_buffer_megabytes.saturating_mul(1024 * 1024),
+    )?;
 
     tracing::info!("Running as {}...{}", config.mode, config.version);
 
     match config.mode {
-        Mode::Service => run_as_service(&config).await?,
+        Mode::Service => run_as_service(&config, log_stream).await?,
         Mode::Standalone => run_standalone(&config).await?,
     }
     Ok(())
@@ -165,7 +167,10 @@ async fn initial_setup(config: &Options) -> Result<(uuid::Uuid, MachineId), eyre
     Ok((machine_interface_id, machine_id))
 }
 
-async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
+async fn run_as_service(
+    config: &Options,
+    log_stream: carbide_log_stream::LogStream,
+) -> Result<(), eyre::Report> {
     // Implement the logic to run as a service here
     let (machine_interface_id, machine_id) = initial_setup(config).await?;
 
@@ -224,7 +229,7 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
         // scaffolding.
         if !scout_stream_started {
             scout_stream_started = true;
-            stream::start_scout_stream(machine_id, config);
+            stream::start_scout_stream(machine_id, config, log_stream.clone());
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }

@@ -20,6 +20,7 @@
 
 use std::sync::Once;
 
+use carbide_log_stream::{LogStream, LogStreamLayer};
 use tracing::metadata::LevelFilter;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::prelude::*;
@@ -44,13 +45,42 @@ pub fn init_logging() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Like [`init_logging`], but additionally installs an in-process log tap and
+/// returns a handle to it. The tap mirrors what goes to STDOUT (same
+/// `EnvFilter`) into a bounded broadcast channel plus a byte-capped ring buffer
+/// (`max_bytes`), so the caller can stream its own logs elsewhere — e.g. scout
+/// relaying its logs to the carbide-api admin web UI over ScoutStream. Use the
+/// returned [`LogStream`] to `subscribe()` to live lines or replay recent ones.
+///
+/// As with [`init_logging`], logging is only initialized once per process; if it
+/// was already initialized, the returned handle simply receives no lines.
+pub fn init_logging_with_log_stream(max_bytes: usize) -> eyre::Result<LogStream> {
+    let log_stream = LogStream::with_max_bytes(max_bytes);
+    let tap = LogStreamLayer::new(log_stream.clone());
+    LOG_SETUP.call_once(|| {
+        tracing_subscriber::registry()
+            .with(logfmt::layer().with_filter(env_filter()))
+            .with(tap.with_filter(env_filter()))
+            .try_init()
+            .expect("tracing_subscriber setup failed");
+    });
+    Ok(log_stream)
+}
+
 // A logging subscriber for use on the current thread.
 // Usually you want `init_logging()` instead.
 //
 // Usage: `let guard = subscriber().set_default()`
 // Subscriber is unregistered when guard is dropped.
 pub fn subscriber() -> impl SubscriberInitExt {
-    let env_filter = EnvFilter::builder()
+    Box::new(tracing_subscriber::registry().with(logfmt::layer().with_filter(env_filter())))
+}
+
+// The shared STDOUT log filter: INFO by default (override via `RUST_LOG`), with
+// a few chatty crates pinned quieter. Built fresh per layer since `EnvFilter`
+// isn't `Clone`.
+fn env_filter() -> EnvFilter {
+    EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy()
         .add_directive("tower=warn".parse().unwrap())
@@ -63,7 +93,5 @@ pub fn subscriber() -> impl SubscriberInitExt {
         .add_directive("hickory_proto::xfer=info".parse().unwrap())
         .add_directive("hickory_resolver::name_server=info".parse().unwrap())
         .add_directive("hickory_proto=info".parse().unwrap())
-        .add_directive("netlink_proto=warn".parse().unwrap());
-    let stdout_formatter = logfmt::layer();
-    Box::new(tracing_subscriber::registry().with(stdout_formatter.with_filter(env_filter)))
+        .add_directive("netlink_proto=warn".parse().unwrap())
 }

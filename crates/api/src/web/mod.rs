@@ -783,6 +783,7 @@ pub fn routes(api: Arc<Api>) -> eyre::Result<NormalizePath<Router>> {
             .route("/logs", get(logs::page))
             .route("/logs/{source}/stream", get(logs::stream))
             .route("/logs/{source}/history", get(logs::history))
+            .route("/logs/{source}/connections", get(logs::scout_connections))
             .layer(axum::middleware::from_fn(auth_oauth2))
             .layer(Extension(oauth_extension_layer))
             .with_state(api),
