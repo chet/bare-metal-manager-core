@@ -1001,7 +1001,7 @@ impl SiteExplorer {
         }
 
         let mut managed_hosts = Vec::new();
-        let mut boot_interface_macs: Vec<(IpAddr, MacAddress)> = Vec::new();
+        let mut boot_interfaces: Vec<(IpAddr, model::machine::MachineBootInterface)> = Vec::new();
 
         for (_, ep) in explored_hosts {
             // Resolve the operator-declared DPU mode for this host once;
@@ -1202,11 +1202,12 @@ impl SiteExplorer {
             // If we know the booting interface of the host, we should use this for deciding
             // primary interface.
             let mut is_sorted = false;
-            if let Some(mac_address) = ep
+            if let Some(boot_interface) = ep
                 .report
-                .fetch_host_primary_interface_mac(&dpus_explored_for_host)
+                .fetch_host_primary_boot_interface(&dpus_explored_for_host)
             {
-                boot_interface_macs.push((ep.address, mac_address));
+                let mac_address = boot_interface.mac_address.unwrap_or_default();
+                boot_interfaces.push((ep.address, boot_interface));
 
                 let primary_dpu_position = dpus_explored_for_host
                     .iter()
@@ -1292,9 +1293,9 @@ impl SiteExplorer {
         )
         .await?;
 
-        // Persist boot interface MACs for host endpoints
-        for (address, mac) in &boot_interface_macs {
-            db::explored_endpoints::set_boot_interface_mac(*address, *mac, &mut txn).await?;
+        // Persist boot interface MAC + Redfish EthernetInterface.Id for host endpoints
+        for (address, boot_interface) in &boot_interfaces {
+            db::explored_endpoints::set_boot_interface(*address, boot_interface, &mut txn).await?;
         }
 
         txn.commit().await?;
@@ -1763,7 +1764,9 @@ impl SiteExplorer {
                             endpoint.iface,
                             endpoint.expected,
                             endpoint.last_explored.and_then(|e| e.report.last_exploration_error.as_ref()),
-                            endpoint.last_explored.and_then(|e| e.boot_interface_mac),
+                            endpoint
+                                .last_explored
+                                .and_then(|e| e.boot_interface.mac_address),
                         )
                         .await;
 
@@ -3107,7 +3110,7 @@ mod tests {
             last_redfish_powercycle: None,
             pause_ingestion_and_poweron: false,
             pause_remediation: false,
-            boot_interface_mac: None,
+            boot_interface: model::machine::MachineBootInterface { mac_address: None, interface_id: None },
         }
     }
 
@@ -3201,7 +3204,7 @@ mod tests {
             last_redfish_powercycle: None,
             pause_ingestion_and_poweron: false,
             pause_remediation: false,
-            boot_interface_mac: None,
+            boot_interface: model::machine::MachineBootInterface { mac_address: None, interface_id: None },
         };
 
         assert_eq!(

@@ -516,7 +516,9 @@ impl RedfishClient {
         // We will be redoing machine_setup later and can worry about getting the profile right then.
         client
             .machine_setup(
-                boot_interface_mac,
+                boot_interface_mac
+                    .and_then(|s| s.parse().ok())
+                    .map(libredfish::BootInterfaceRef::Mac),
                 &HashMap::default(),
                 libredfish::BiosProfileType::Performance,
                 &HashMap::default(),
@@ -1143,7 +1145,7 @@ async fn fetch_machine_setup_status(
     boot_interface_mac: Option<MacAddress>,
 ) -> Result<MachineSetupStatus, RedfishError> {
     let status = client
-        .machine_setup_status(boot_interface_mac.map(|mac| mac.to_string()).as_deref())
+        .machine_setup_status(boot_interface_mac.map(libredfish::BootInterfaceRef::Mac))
         .await?;
     let mut diffs: Vec<MachineSetupDiff> = Vec::new();
 

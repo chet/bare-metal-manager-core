@@ -278,7 +278,7 @@ impl Redfish for RedfishSimClient {
 
     fn machine_setup<'a>(
         &'a self,
-        _boot_interface_mac: Option<&'a str>,
+        _boot_interface: Option<libredfish::BootInterfaceRef<'a>>,
         _bios_profiles: &'a HashMap<
             libredfish::model::service_root::RedfishVendor,
             HashMap<
@@ -307,7 +307,7 @@ impl Redfish for RedfishSimClient {
 
     fn machine_setup_status<'a>(
         &'a self,
-        _boot_interface_mac: Option<&'a str>,
+        _boot_interface: Option<libredfish::BootInterfaceRef<'a>>,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::MachineSetupStatus, RedfishError>> {
         Box::pin(async move {
             Ok(libredfish::MachineSetupStatus {
@@ -1354,7 +1354,7 @@ impl Redfish for RedfishSimClient {
 
     fn is_bios_setup<'a>(
         &'a self,
-        _: Option<&'a str>,
+        _: Option<libredfish::BootInterfaceRef<'a>>,
     ) -> libredfish::RedfishFuture<'a, Result<bool, RedfishError>> {
         Box::pin(async move { Ok(self.state.lock().unwrap().is_bios_setup.unwrap_or(true)) })
     }

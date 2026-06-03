@@ -182,8 +182,10 @@ pub struct ExploredEndpoint {
     pub pause_ingestion_and_poweron: bool,
     /// Flag to prevent site explorer from taking remediation actions on redfish errors
     pub pause_remediation: bool,
-    /// The MAC address of the boot interface (primary interface) for this host endpoint
-    pub boot_interface_mac: Option<MacAddress>,
+    /// The boot interface (primary interface) for this host endpoint --
+    /// MAC and Redfish `EthernetInterface.Id`, populated by site-explorer
+    /// during discovery.
+    pub boot_interface: crate::machine::MachineBootInterface,
 }
 
 impl Display for ExploredEndpoint {
@@ -260,17 +262,59 @@ impl ExploredEndpoint {
 }
 
 impl EndpointExplorationReport {
-    pub fn fetch_host_primary_interface_mac(
+    /// Returns the MAC and the Redfish `EthernetInterface.Id` of the host's
+    /// primary boot interface, picking the lowest UEFI-PCI-path candidate
+    /// among the eligible interfaces.
+    ///
+    /// For DpuMode hosts (`explored_dpus` non-empty), candidates are the
+    /// host-side ethernet interfaces whose MAC matches an explored DPU's
+    /// `host_pf_mac_address`.
+    ///
+    /// For NicMode / un-paired hosts (`explored_dpus.is_empty()`),
+    /// candidates are sourced from the host BMC's chassis enumeration:
+    /// for any `NetworkAdapter` whose `PartNumber` matches a known
+    /// BlueField identifier, pick the `system.ethernet_interfaces`
+    /// entries whose `id` starts with the adapter id (e.g. adapter
+    /// `NIC.Slot.7` matches interfaces `NIC.Slot.7-1-1`, `NIC.Slot.7-2-1`).
+    /// Entries whose `MACAddress` is empty are skipped — some BMCs
+    /// publish empty MACs for partitions that aren't currently bound for
+    /// boot, and an empty MAC is useless as a boot target anyway.
+    pub fn fetch_host_primary_boot_interface(
         &self,
         explored_dpus: &[ExploredDpu],
-    ) -> Option<MacAddress> {
+    ) -> Option<crate::machine::MachineBootInterface> {
         let system = self.systems.first()?;
 
-        // Gather explored DPUs mac.
-        let explored_dpus_macs = explored_dpus
-            .iter()
-            .filter_map(|x| x.host_pf_mac_address)
-            .collect::<Vec<MacAddress>>();
+        let candidate_macs = if explored_dpus.is_empty() {
+            // NicMode / un-paired host: source candidates from the
+            // chassis-side BlueField enumeration.
+            self.chassis
+                .iter()
+                .flat_map(|c| c.network_adapters.iter())
+                .filter(|adapter| {
+                    adapter
+                        .part_number
+                        .as_ref()
+                        .is_some_and(|p| is_bluefield_model(p.trim()))
+                })
+                .flat_map(|adapter| {
+                    let prefix = format!("{}-", adapter.id);
+                    system.ethernet_interfaces.iter().filter_map(move |eif| {
+                        let id = eif.id.as_ref()?;
+                        if id.starts_with(&prefix) {
+                            eif.mac_address
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect::<Vec<MacAddress>>()
+        } else {
+            explored_dpus
+                .iter()
+                .filter_map(|x| x.host_pf_mac_address)
+                .collect::<Vec<MacAddress>>()
+        };
 
         // Filter PCI device names only for the interfaces which are mapped to DPU.
         // Host might have some integrated or embedded interfaces, which are not used by forge.
@@ -280,7 +324,7 @@ impl EndpointExplorationReport {
             .iter()
             .filter(|x| {
                 if let Some(mac) = x.mac_address {
-                    explored_dpus_macs.contains(&mac)
+                    candidate_macs.contains(&mac)
                 } else {
                     false
                 }
@@ -318,8 +362,9 @@ impl EndpointExplorationReport {
             acc
         });
 
-        // If we know the bootable interface name, find the MAC address associated with it.
-        interface_with_min_pci.mac_address
+        let mac = interface_with_min_pci.mac_address?;
+        let id = interface_with_min_pci.id.clone()?;
+        Some(crate::machine::MachineBootInterface::new(Some(mac), Some(id)))
     }
 }
 
@@ -1524,7 +1569,7 @@ mod tests {
             last_redfish_reboot: None,
             last_redfish_powercycle: None,
             pause_remediation: false,
-            boot_interface_mac: None,
+            boot_interface: crate::machine::MachineBootInterface { mac_address: None, interface_id: None },
             pause_ingestion_and_poweron: false,
         }
     }
@@ -2091,5 +2136,267 @@ mod tests {
         let system: ComputerSystem =
             serde_json::from_value(json).expect("should deserialize missing BaseMac");
         assert_eq!(system.base_mac, None);
+    }
+
+    // -- fetch_host_primary_boot_interface NicMode fallback ---------------
+
+    fn eif(id: &str, mac: Option<&str>, pci: Option<&str>) -> EthernetInterface {
+        EthernetInterface {
+            id: Some(id.to_string()),
+            mac_address: mac.map(|m| m.parse().unwrap()),
+            uefi_device_path: pci.map(|p| UefiDevicePath::from_str(p).unwrap()),
+            ..Default::default()
+        }
+    }
+
+    fn report_with(system: ComputerSystem, chassis: Vec<Chassis>) -> EndpointExplorationReport {
+        EndpointExplorationReport {
+            systems: vec![system],
+            chassis,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn nic_mode_fallback_picks_bluefield_partition_lowest_pci() {
+        let system = ComputerSystem {
+            ethernet_interfaces: vec![
+                eif(
+                    "NIC.Integrated.1-1-1",
+                    Some("AA:BB:CC:DD:EE:00"),
+                    Some("PciRoot(0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(AABBCCDDEE00,0x1)"),
+                ),
+                eif(
+                    "NIC.Slot.7-1-1",
+                    Some("5C:25:73:9E:84:B2"),
+                    Some("PciRoot(0x11)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(5C25739E84B2,0x1)"),
+                ),
+                eif(
+                    "NIC.Slot.7-2-1",
+                    Some("5C:25:73:9E:84:B3"),
+                    Some("PciRoot(0x11)/Pci(0x1,0x0)/Pci(0x0,0x1)/MAC(5C25739E84B3,0x1)"),
+                ),
+            ],
+            ..Default::default()
+        };
+        let chassis = vec![Chassis {
+            id: "System.Embedded.1".to_string(),
+            network_adapters: vec![NetworkAdapter {
+                id: "NIC.Slot.7".to_string(),
+                part_number: Some("900-9D3B6-00CV-AA0".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let report = report_with(system, chassis);
+
+        let bi = report
+            .fetch_host_primary_boot_interface(&[])
+            .expect("should derive boot interface from BlueField chassis adapter");
+        // Lower PCI between the two BlueField partitions wins:
+        // 7-1-1 has lower function (0x0) than 7-2-1 (0x1).
+        assert_eq!(bi.interface_id.as_deref(), Some("NIC.Slot.7-1-1"));
+        assert_eq!(bi.mac_address.unwrap().to_string(), "5C:25:73:9E:84:B2");
+    }
+
+    #[test]
+    fn nic_mode_fallback_skips_non_bluefield_adapters() {
+        let system = ComputerSystem {
+            ethernet_interfaces: vec![eif(
+                "NIC.Integrated.1-1-1",
+                Some("AA:BB:CC:DD:EE:00"),
+                Some("PciRoot(0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(AABBCCDDEE00,0x1)"),
+            )],
+            ..Default::default()
+        };
+        let chassis = vec![Chassis {
+            id: "System.Embedded.1".to_string(),
+            network_adapters: vec![NetworkAdapter {
+                id: "NIC.Integrated.1".to_string(),
+                // A regular onboard NIC, not a BlueField part number.
+                part_number: Some("0CN7CM-A00".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let report = report_with(system, chassis);
+
+        assert!(
+            report.fetch_host_primary_boot_interface(&[]).is_none(),
+            "should return None when no BlueField adapter is in chassis",
+        );
+    }
+
+    #[test]
+    fn nic_mode_fallback_skips_interfaces_with_no_mac() {
+        // Some BMCs publish empty MACs for partitions that aren't currently
+        // bound for boot. These shouldn't make it into the candidate set —
+        // an empty MAC is useless as a boot target.
+        let system = ComputerSystem {
+            ethernet_interfaces: vec![
+                eif(
+                    "NIC.Slot.7-1-1",
+                    None,
+                    Some("PciRoot(0x11)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(0,0x1)"),
+                ),
+                eif(
+                    "NIC.Slot.7-2-1",
+                    Some("5C:25:73:9E:84:B3"),
+                    Some("PciRoot(0x11)/Pci(0x1,0x0)/Pci(0x0,0x1)/MAC(5C25739E84B3,0x1)"),
+                ),
+            ],
+            ..Default::default()
+        };
+        let chassis = vec![Chassis {
+            id: "System.Embedded.1".to_string(),
+            network_adapters: vec![NetworkAdapter {
+                id: "NIC.Slot.7".to_string(),
+                part_number: Some("900-9D3B6-00CV-AA0".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let report = report_with(system, chassis);
+
+        let bi = report
+            .fetch_host_primary_boot_interface(&[])
+            .expect("should pick the populated partition, skipping the empty-MAC one");
+        assert_eq!(bi.interface_id.as_deref(), Some("NIC.Slot.7-2-1"));
+        assert_eq!(bi.mac_address.unwrap().to_string(), "5C:25:73:9E:84:B3");
+    }
+
+    #[test]
+    fn dpu_mode_fallback_not_invoked_when_explored_dpus_present() {
+        // Regression guard: when `explored_dpus` is non-empty, the function
+        // should use that as the candidate set even if BlueField adapters
+        // appear in the chassis. Existing DpuMode behavior preserved.
+        let system = ComputerSystem {
+            ethernet_interfaces: vec![
+                eif(
+                    "NIC.Slot.7-1-1",
+                    Some("AA:00:00:00:00:01"),
+                    Some("PciRoot(0x11)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(AA0000000001,0x1)"),
+                ),
+                eif(
+                    "NIC.Slot.7-2-1",
+                    Some("AA:00:00:00:00:02"),
+                    Some("PciRoot(0x11)/Pci(0x1,0x0)/Pci(0x0,0x1)/MAC(AA0000000002,0x1)"),
+                ),
+            ],
+            ..Default::default()
+        };
+        let chassis = vec![Chassis {
+            id: "System.Embedded.1".to_string(),
+            network_adapters: vec![NetworkAdapter {
+                id: "NIC.Slot.7".to_string(),
+                part_number: Some("900-9D3B6-00CV-AA0".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let report = report_with(system, chassis);
+
+        // Pretend only the second partition is "explored as a DPU."
+        let explored = ExploredDpu {
+            bmc_ip: "192.0.2.1".parse().unwrap(),
+            host_pf_mac_address: Some("AA:00:00:00:00:02".parse().unwrap()),
+            report: Arc::new(EndpointExplorationReport::default()),
+        };
+
+        let bi = report
+            .fetch_host_primary_boot_interface(&[explored])
+            .expect("should derive from the DPU-explored MAC, not chassis");
+        assert_eq!(bi.interface_id.as_deref(), Some("NIC.Slot.7-2-1"));
+        assert_eq!(bi.mac_address.unwrap().to_string(), "AA:00:00:00:00:02");
+    }
+
+    #[test]
+    fn nic_mode_fallback_prefix_boundary_doesnt_match_similar_id() {
+        // Regression guard for the `id.starts_with(&format!("{}-", adapter.id))`
+        // boundary: adapter `NIC.Slot.7` must not accept an interface id like
+        // `NIC.Slot.71-1-1`, which only shares a leading substring. The
+        // trailing `-` in the prefix is what protects us; this test pins
+        // that the protection actually works.
+        let system = ComputerSystem {
+            ethernet_interfaces: vec![eif(
+                "NIC.Slot.71-1-1",
+                Some("AA:BB:CC:DD:EE:71"),
+                Some("PciRoot(0x12)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(AABBCCDDEE71,0x1)"),
+            )],
+            ..Default::default()
+        };
+        let chassis = vec![Chassis {
+            id: "System.Embedded.1".to_string(),
+            network_adapters: vec![NetworkAdapter {
+                id: "NIC.Slot.7".to_string(),
+                part_number: Some("900-9D3B6-00CV-AA0".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let report = report_with(system, chassis);
+
+        assert!(
+            report.fetch_host_primary_boot_interface(&[]).is_none(),
+            "adapter `NIC.Slot.7` must not match the unrelated `NIC.Slot.71-1-1` interface id",
+        );
+    }
+
+    #[test]
+    fn nic_mode_fallback_picks_lowest_pci_across_multiple_bluefield_adapters() {
+        // Two BlueField adapters in chassis, each with its own partitions.
+        // The lowest-PCI-path candidate across *all* of them should win,
+        // not just within one adapter's partitions.
+        let system = ComputerSystem {
+            ethernet_interfaces: vec![
+                eif(
+                    "NIC.Slot.7-1-1",
+                    Some("5C:25:73:9E:84:B2"),
+                    Some("PciRoot(0x11)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(5C25739E84B2,0x1)"),
+                ),
+                eif(
+                    "NIC.Slot.7-2-1",
+                    Some("5C:25:73:9E:84:B3"),
+                    Some("PciRoot(0x11)/Pci(0x1,0x0)/Pci(0x0,0x1)/MAC(5C25739E84B3,0x1)"),
+                ),
+                eif(
+                    "NIC.Slot.8-1-1",
+                    Some("5C:25:73:9E:84:C2"),
+                    // Lower PciRoot than Slot.7's interfaces, so this
+                    // partition wins despite belonging to a different
+                    // adapter.
+                    Some("PciRoot(0x09)/Pci(0x1,0x0)/Pci(0x0,0x0)/MAC(5C25739E84C2,0x1)"),
+                ),
+                eif(
+                    "NIC.Slot.8-2-1",
+                    Some("5C:25:73:9E:84:C3"),
+                    Some("PciRoot(0x09)/Pci(0x1,0x0)/Pci(0x0,0x1)/MAC(5C25739E84C3,0x1)"),
+                ),
+            ],
+            ..Default::default()
+        };
+        let chassis = vec![Chassis {
+            id: "System.Embedded.1".to_string(),
+            network_adapters: vec![
+                NetworkAdapter {
+                    id: "NIC.Slot.7".to_string(),
+                    part_number: Some("900-9D3B6-00CV-AA0".to_string()),
+                    ..Default::default()
+                },
+                NetworkAdapter {
+                    id: "NIC.Slot.8".to_string(),
+                    part_number: Some("900-9D3B6-00CV-AA0".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+        let report = report_with(system, chassis);
+
+        let bi = report
+            .fetch_host_primary_boot_interface(&[])
+            .expect("should pick globally-lowest-PCI across both BlueField adapters");
+        assert_eq!(bi.interface_id.as_deref(), Some("NIC.Slot.8-1-1"));
+        assert_eq!(bi.mac_address.unwrap().to_string(), "5C:25:73:9E:84:C2");
     }
 }

@@ -131,7 +131,11 @@ pub async fn action(action: RedfishAction) -> color_eyre::Result<()> {
 
             redfish
                 .machine_setup(
-                    machine_setup_args.boot_interface_mac.as_deref(),
+                    machine_setup_args
+                        .boot_interface_mac
+                        .as_deref()
+                        .and_then(|s| s.parse().ok())
+                        .map(libredfish::BootInterfaceRef::Mac),
                     &bios_profiles,
                     selected_profile,
                     &HashMap::default(),
@@ -142,7 +146,13 @@ pub async fn action(action: RedfishAction) -> color_eyre::Result<()> {
             println!(
                 "{}",
                 redfish
-                    .machine_setup_status(machine_setup_status_args.boot_interface_mac.as_deref())
+                    .machine_setup_status(
+                        machine_setup_status_args
+                            .boot_interface_mac
+                            .as_deref()
+                            .and_then(|s| s.parse().ok())
+                            .map(libredfish::BootInterfaceRef::Mac)
+                    )
                     .await?
             );
         }

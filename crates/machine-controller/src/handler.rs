@@ -9586,7 +9586,9 @@ pub async fn call_machine_setup_and_handle_no_dpu_error(
 ) -> Result<Option<String>, RedfishError> {
     let setup_result = redfish_client
         .machine_setup(
-            boot_interface_mac,
+            boot_interface_mac
+                .and_then(|s| s.parse().ok())
+                .map(libredfish::BootInterfaceRef::Mac),
             &site_config.bios_profiles,
             site_config.selected_profile,
             &site_config.oem_manager_profiles,
@@ -10691,7 +10693,7 @@ mod tests {
             last_redfish_powercycle: None,
             pause_ingestion_and_poweron: false,
             pause_remediation: false,
-            boot_interface_mac: None,
+            boot_interface: model::machine::MachineBootInterface { mac_address: None, interface_id: None },
         };
 
         let to_install = need_host_fw_upgrade(&endpoint, &fw_info, firmware_type)

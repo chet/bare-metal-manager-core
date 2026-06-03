@@ -474,7 +474,7 @@ pub(crate) async fn explore(
     let boot_interface_mac = db::explored_endpoints::find_by_ips(&mut txn, vec![bmc_addr.ip()])
         .await?
         .first()
-        .and_then(|ep| ep.boot_interface_mac);
+        .and_then(|ep| ep.boot_interface.mac_address);
     txn.commit().await?;
 
     let report = api

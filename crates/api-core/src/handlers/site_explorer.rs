@@ -244,7 +244,7 @@ pub(crate) async fn refresh_endpoint_report(
             id: bmc_ip.to_string(),
         })?;
 
-    let boot_interface_mac = existing_ep.boot_interface_mac;
+    let boot_interface_mac = existing_ep.boot_interface.mac_address;
     let existing_report = existing_ep.report.clone();
 
     let bmc_interface = db::machine_interface::find_by_ip(&mut txn, bmc_ip)

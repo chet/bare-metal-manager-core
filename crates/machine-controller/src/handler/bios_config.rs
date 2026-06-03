@@ -386,11 +386,11 @@ pub(super) async fn advance_polling_bios_setup(
     retry_count: u32,
     machine_controller_config: &MachineStateControllerConfig,
 ) -> Result<PollingBiosSetupOutcome, StateHandlerError> {
-    let boot_interface_mac = mh_snapshot.boot_interface_mac().map(|m| m.to_string());
+    let boot_interface_mac = mh_snapshot.boot_interface_mac();
     let stuck_for = mh_snapshot.host_snapshot.state.version.since_state_change();
 
     match redfish_client
-        .is_bios_setup(boot_interface_mac.as_deref())
+        .is_bios_setup(boot_interface_mac.map(libredfish::BootInterfaceRef::Mac))
         .await
     {
         Ok(true) => {
@@ -458,13 +458,13 @@ pub(super) async fn handle_bios_setup_failed_recovery(
     mh_snapshot: &ManagedHostStateSnapshot,
     recovered_state: ManagedHostState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let boot_interface_mac = mh_snapshot.boot_interface_mac().map(|m| m.to_string());
+    let boot_interface_mac = mh_snapshot.boot_interface_mac();
     let redfish_client = ctx
         .services
         .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
         .await?;
     match redfish_client
-        .is_bios_setup(boot_interface_mac.as_deref())
+        .is_bios_setup(boot_interface_mac.map(libredfish::BootInterfaceRef::Mac))
         .await
     {
         Ok(true) => {

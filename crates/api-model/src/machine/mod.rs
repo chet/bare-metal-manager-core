@@ -103,6 +103,55 @@ fn default_true() -> bool {
 // This should be updated on each new model introduction
 pub const CURRENT_STATE_MODEL_VERSION: i16 = 2;
 
+/// Identifies a host's boot interface for libredfish calls
+/// (`machine_setup`, `machine_setup_status`, `is_bios_setup`).
+///
+/// Both fields are optional and can be set independently:
+///
+/// - `mac_address` is the MAC of the boot interface, suitable for the
+///   classic `BootInterfaceRef::Mac` arm. Always populated in steady
+///   state.
+/// - `interface_id` is the vendor-native Redfish `EthernetInterface.Id`
+///   (e.g. `"NIC.Slot.7-1-1"`), suitable for the
+///   `BootInterfaceRef::InterfaceId` arm. Captured by site-explorer at
+///   discovery and used as a fallback for cases where the MAC isn't
+///   currently published by the BMC (e.g. NIC-mode-DPU bring-up where
+///   the partition is Disabled).
+///
+/// Converts to `Option<libredfish::BootInterfaceRef>` via `Into`,
+/// preferring `InterfaceId` over `Mac` when both are present. Pass
+/// directly to `machine_setup(boot.into(), ...)`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MachineBootInterface {
+    pub mac_address: Option<mac_address::MacAddress>,
+    pub interface_id: Option<String>,
+}
+
+impl MachineBootInterface {
+    pub fn new(
+        mac_address: Option<mac_address::MacAddress>,
+        interface_id: Option<String>,
+    ) -> Self {
+        Self {
+            mac_address,
+            interface_id,
+        }
+    }
+}
+
+impl<'a> From<&'a MachineBootInterface> for Option<libredfish::BootInterfaceRef<'a>> {
+    fn from(boot_interface: &'a MachineBootInterface) -> Self {
+        match (
+            boot_interface.interface_id.as_deref(),
+            boot_interface.mac_address,
+        ) {
+            (Some(id), _) => Some(libredfish::BootInterfaceRef::InterfaceId(id)),
+            (None, Some(mac)) => Some(libredfish::BootInterfaceRef::Mac(mac)),
+            (None, None) => None,
+        }
+    }
+}
+
 /// Represents the current state of `Machine`
 #[derive(Debug, Clone)]
 pub struct ManagedHostStateSnapshot {

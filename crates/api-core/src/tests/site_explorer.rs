@@ -2199,10 +2199,10 @@ async fn test_fetch_host_primary_interface_mac(
     }
 
     let expected_mac: MacAddress = mock_dpus[1].host_mac_address;
-    let mac = host_report
-        .fetch_host_primary_interface_mac(&explored_dpus)
+    let boot_interface = host_report
+        .fetch_host_primary_boot_interface(&explored_dpus)
         .unwrap();
-    assert_eq!(mac, expected_mac);
+    assert_eq!(boot_interface.mac_address, Some(expected_mac));
     Ok(())
 }
 
@@ -4244,7 +4244,7 @@ async fn test_site_explorer_creates_power_shelf(
         last_redfish_reboot: None,
         last_redfish_powercycle: None,
         pause_remediation: false,
-        boot_interface_mac: None,
+        boot_interface: model::machine::MachineBootInterface { mac_address: None, interface_id: None },
         pause_ingestion_and_poweron: false,
     };
 
@@ -4435,7 +4435,7 @@ async fn test_power_shelf_state_history(
         last_redfish_reboot: None,
         last_redfish_powercycle: None,
         pause_remediation: false,
-        boot_interface_mac: None,
+        boot_interface: model::machine::MachineBootInterface { mac_address: None, interface_id: None },
         pause_ingestion_and_poweron: false,
     };
 
@@ -4690,7 +4690,7 @@ async fn test_power_shelf_state_history_multiple(
         last_redfish_reboot: None,
         last_redfish_powercycle: None,
         pause_remediation: false,
-        boot_interface_mac: None,
+        boot_interface: model::machine::MachineBootInterface { mac_address: None, interface_id: None },
         pause_ingestion_and_poweron: false,
     };
 
@@ -4706,7 +4706,7 @@ async fn test_power_shelf_state_history_multiple(
         last_redfish_reboot: None,
         last_redfish_powercycle: None,
         pause_remediation: false,
-        boot_interface_mac: None,
+        boot_interface: model::machine::MachineBootInterface { mac_address: None, interface_id: None },
         pause_ingestion_and_poweron: false,
     };
 
@@ -4946,7 +4946,7 @@ async fn test_power_shelf_state_history_error_handling(
         last_redfish_reboot: None,
         last_redfish_powercycle: None,
         pause_remediation: false,
-        boot_interface_mac: None,
+        boot_interface: model::machine::MachineBootInterface { mac_address: None, interface_id: None },
         pause_ingestion_and_poweron: false,
     };
 
@@ -5912,7 +5912,7 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
         last_redfish_reboot: None,
         last_redfish_powercycle: None,
         pause_remediation: false,
-        boot_interface_mac: None,
+        boot_interface: model::machine::MachineBootInterface { mac_address: None, interface_id: None },
         pause_ingestion_and_poweron: false,
     };
 
