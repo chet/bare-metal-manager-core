@@ -29,7 +29,7 @@ pub struct DbResourceRecord {
     pub q_type: String,
     pub ttl: i32,
     pub q_name: String,
-    pub record: String,
+    pub record: IpAddr,
     pub domain_id: DomainId,
 }
 
@@ -39,7 +39,7 @@ impl From<DbResourceRecord> for model::dns::ResourceRecord {
             q_type: r.q_type,
             q_name: r.q_name,
             ttl: r.ttl as u32,
-            content: r.record,
+            content: r.record.into(),
             domain_id: Some(r.domain_id.to_string()),
         }
     }
@@ -56,10 +56,7 @@ impl<'r> FromRow<'r, PgRow> for DbSoaRecord {
 
 impl<'r> FromRow<'r, PgRow> for DbResourceRecord {
     fn from_row(row: &'r PgRow) -> Result<Self, Error> {
-        // Stored as IP address in the database
-        let record: String = row
-            .try_get("resource_record")
-            .map(|i: IpAddr| i.to_string())?;
+        let record: IpAddr = row.try_get("resource_record")?;
         let q_name: String = row.try_get("q_name")?;
         let q_type: String = row.try_get("q_type")?;
         let ttl: i32 = row.try_get("ttl")?;

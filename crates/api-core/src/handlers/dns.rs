@@ -17,7 +17,7 @@
 use ::rpc::protos;
 use db::db_read::DbReader;
 use db::dns::resource_record;
-use dns_record::{DnsResourceRecordReply, DnsResourceRecordType};
+use dns_record::{DnsResourceRecordContent, DnsResourceRecordReply, DnsResourceRecordType};
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -52,7 +52,7 @@ async fn lookup_soa_record(
         qtype: DnsResourceRecordType::SOA.to_string(),
         qname: query_name.to_string(),
         ttl: record.0.ttl.0 as u32,
-        content: record.0.to_string(),
+        content: DnsResourceRecordContent::Other(record.0.to_string()),
         domain_id: None,
         scope_mask: None,
         auth: None,

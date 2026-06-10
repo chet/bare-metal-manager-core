@@ -515,7 +515,7 @@ impl From<DnsResourceRecordReply> for crate::protos::dns::DnsResourceRecord {
             qtype: value.qtype,
             qname: value.qname,
             ttl: value.ttl,
-            content: value.content,
+            content: value.content.to_string(),
             auth: value.auth,
             domain_id: value.domain_id,
             scope_mask: value.scope_mask,

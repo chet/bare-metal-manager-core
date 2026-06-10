@@ -24,7 +24,7 @@ use std::iter;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dns_record::DnsResourceRecordType;
+use dns_record::{DnsResourceRecordContent, DnsResourceRecordType};
 use eyre::Report;
 use hickory_resolver::proto::op::ResponseCode;
 use hickory_resolver::proto::rr::{DNSClass, Name, RData};
@@ -345,19 +345,16 @@ impl DnsServer {
             // The API returns all record types for the qname; keep only the requested type.
             .filter(|r| DnsResourceRecordType::try_from(r.qtype.as_str()).ok() == Some(qtype))
             .filter_map(|r| {
-                let rdata = match qtype {
-                    DnsResourceRecordType::A => {
-                        let ip = r.content.parse::<std::net::Ipv4Addr>().map_err(|e| {
-                            warn!(content = %r.content, error = %e, "Failed to parse IPv4 address");
-                            e
-                        }).ok()?;
-                        RData::A(ip.into())
-                    }
-                    DnsResourceRecordType::AAAA => {
-                        let ip = r.content.parse::<std::net::Ipv6Addr>().map_err(|e| {
-                            warn!(content = %r.content, error = %e, "Failed to parse IPv6 address");
-                            e
-                        }).ok()?;
+                let content = DnsResourceRecordContent::from_qtype_and_content(qtype, &r.content)
+                    .map_err(|e| {
+                        warn!(content = %r.content, error = %e, "Failed to parse DNS record content");
+                        e
+                    })
+                    .ok()?;
+
+                let rdata = match (qtype, content.address()?) {
+                    (DnsResourceRecordType::A, std::net::IpAddr::V4(ip)) => RData::A(ip.into()),
+                    (DnsResourceRecordType::AAAA, std::net::IpAddr::V6(ip)) => {
                         RData::AAAA(ip.into())
                     }
                     // Unreachable: handle_request only dispatches A and AAAA to this function.

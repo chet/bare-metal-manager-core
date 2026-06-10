@@ -16,9 +16,10 @@
  */
 
 use std::fmt::Display;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use chrono::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing::debug;
 
 pub mod constants;
@@ -54,10 +55,106 @@ pub struct DnsResourceRecordReply {
     pub qtype: String,
     pub qname: String,
     pub ttl: u32,
-    pub content: String,
+    pub content: DnsResourceRecordContent,
     pub domain_id: Option<String>,
     pub scope_mask: Option<String>,
     pub auth: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DnsResourceRecordContent {
+    Address(IpAddr),
+    Other(String),
+}
+
+impl DnsResourceRecordContent {
+    pub fn from_qtype_and_content(
+        qtype: DnsResourceRecordType,
+        content: impl AsRef<str>,
+    ) -> Result<Self, String> {
+        let content = content.as_ref();
+        match qtype {
+            DnsResourceRecordType::A => content
+                .parse::<Ipv4Addr>()
+                .map(|ip| Self::Address(ip.into()))
+                .map_err(|e| format!("Invalid A record content {content}: {e}")),
+            DnsResourceRecordType::AAAA => content
+                .parse::<Ipv6Addr>()
+                .map(|ip| Self::Address(ip.into()))
+                .map_err(|e| format!("Invalid AAAA record content {content}: {e}")),
+            _ => Ok(Self::Other(content.to_string())),
+        }
+    }
+
+    pub fn address(&self) -> Option<IpAddr> {
+        match self {
+            Self::Address(address) => Some(*address),
+            Self::Other(_) => None,
+        }
+    }
+}
+
+impl Default for DnsResourceRecordContent {
+    fn default() -> Self {
+        Self::Other(String::new())
+    }
+}
+
+impl Display for DnsResourceRecordContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Address(address) => write!(f, "{address}"),
+            Self::Other(content) => write!(f, "{content}"),
+        }
+    }
+}
+
+impl From<IpAddr> for DnsResourceRecordContent {
+    fn from(value: IpAddr) -> Self {
+        Self::Address(value)
+    }
+}
+
+impl From<Ipv4Addr> for DnsResourceRecordContent {
+    fn from(value: Ipv4Addr) -> Self {
+        Self::Address(value.into())
+    }
+}
+
+impl From<Ipv6Addr> for DnsResourceRecordContent {
+    fn from(value: Ipv6Addr) -> Self {
+        Self::Address(value.into())
+    }
+}
+
+impl From<String> for DnsResourceRecordContent {
+    fn from(value: String) -> Self {
+        Self::Other(value)
+    }
+}
+
+impl From<&str> for DnsResourceRecordContent {
+    fn from(value: &str) -> Self {
+        value.to_string().into()
+    }
+}
+
+impl Serialize for DnsResourceRecordContent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for DnsResourceRecordContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self::Other)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, Eq, PartialEq)]
@@ -306,7 +403,11 @@ mod tests {
             qtype: DnsResourceRecordType::A.to_string(),
             qname: "example.com".to_string(),
             ttl: 3600,
-            content: "192.168.1.1".to_string(),
+            content: DnsResourceRecordContent::from_qtype_and_content(
+                DnsResourceRecordType::A,
+                "192.168.1.1",
+            )
+            .unwrap(),
             domain_id: Some(domain_uuid.to_string()),
             scope_mask: None,
             auth: None,
@@ -328,6 +429,31 @@ mod tests {
     }
 
     #[test]
+    fn test_dns_resource_record_content_parses_ip_record_types() {
+        let ipv4 =
+            DnsResourceRecordContent::from_qtype_and_content(DnsResourceRecordType::A, "192.0.2.1")
+                .unwrap();
+        assert_eq!(ipv4.address().unwrap().to_string(), "192.0.2.1");
+
+        let ipv6 = DnsResourceRecordContent::from_qtype_and_content(
+            DnsResourceRecordType::AAAA,
+            "fd00::1",
+        )
+        .unwrap();
+        assert_eq!(ipv6.address().unwrap().to_string(), "fd00::1");
+
+        assert!(
+            DnsResourceRecordContent::from_qtype_and_content(DnsResourceRecordType::A, "fd00::1")
+                .is_err()
+        );
+
+        let soa =
+            DnsResourceRecordContent::from_qtype_and_content(DnsResourceRecordType::SOA, "fd00::1")
+                .unwrap();
+        assert!(matches!(soa, DnsResourceRecordContent::Other(_)));
+    }
+
+    #[test]
     fn test_soa_record_dns_lookup_record_reply_as_json() {
         let soa = SoaRecord {
             primary_ns: "ns1.example.com".to_string(),
@@ -343,7 +469,7 @@ mod tests {
             qtype: DnsResourceRecordType::SOA.to_string(),
             qname: "example.com".to_string(),
             ttl: 3600,
-            content: soa.to_string(),
+            content: DnsResourceRecordContent::Other(soa.to_string()),
             domain_id: None,
             scope_mask: None,
             auth: None,

@@ -20,7 +20,7 @@
 //! This module provides conversions from database types to the shared
 //! `DnsResourceRecordReply` type from the `dns_record` crate.
 
-use dns_record::DnsResourceRecordReply;
+use dns_record::{DnsResourceRecordContent, DnsResourceRecordReply};
 
 /// Represents a resource record from the database.
 ///
@@ -30,7 +30,7 @@ pub struct ResourceRecord {
     pub q_type: String,
     pub q_name: String,
     pub ttl: u32,
-    pub content: String,
+    pub content: DnsResourceRecordContent,
     pub domain_id: Option<String>,
 }
 
