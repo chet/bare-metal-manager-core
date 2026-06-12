@@ -27,12 +27,14 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use mac_address::MacAddress;
 use model::expected_machine::{DpuMode, ExpectedMachine, ExpectedMachineData};
+use model::network_segment::NetworkSegmentType;
 use model::test_support::ManagedHostConfig;
 
 struct ZeroDpuEnv {
     pool: PgPool,
     test_harness: TestHarness,
     underlay_segment: TestNetworkSegment,
+    admin_segment: TestNetworkSegment,
     host_inband_segment: TestNetworkSegment,
     site_explorer: TestSiteExplorer,
 }
@@ -44,10 +46,42 @@ impl ZeroDpuEnv {
 }
 
 async fn init(pool: PgPool) -> ZeroDpuEnv {
-    let test_harness = TestHarness::builder(pool.clone()).build().await;
+    init_with_site_dpu_mode(pool, None).await
+}
+
+/// `init` with the explorer's site-wide `dpu_mode` set (the fallback when
+/// an ExpectedMachine leaves `dpu_mode` at its default).
+async fn init_with_site_dpu_mode(pool: PgPool, site_dpu_mode: Option<DpuMode>) -> ZeroDpuEnv {
+    // Three vlan-backed segments (underlay, admin, host-inband); the
+    // default vlan/vni pools only cover two.
+    let int_range_pool = |start: u32, end: u32| model::resource_pool::ResourcePoolDef {
+        pool_type: model::resource_pool::ResourcePoolType::Integer,
+        ranges: vec![model::resource_pool::Range {
+            start: start.to_string(),
+            end: end.to_string(),
+            auto_assign: true,
+        }],
+        prefix: None,
+        delegate_prefix_len: None,
+    };
+    let mut resource_pools = ResourcePoolBuilder::default().build();
+    resource_pools.insert(
+        model::resource_pool::common::VLANID.to_string(),
+        int_range_pool(1, 3),
+    );
+    resource_pools.insert(
+        model::resource_pool::common::VNI.to_string(),
+        int_range_pool(10001, 10003),
+    );
+
+    let test_harness = TestHarness::builder(pool.clone())
+        .with_resource_pools(resource_pools)
+        .build()
+        .await;
     let domain = test_harness.test_domain().await;
     let network_controller = test_harness.network_controller();
     let underlay_segment = network_controller.create_underlay_segment(&domain).await;
+    let admin_segment = network_controller.create_admin_segment(&domain).await;
     let host_inband_segment = network_controller.create_host_inband_segment(&domain).await;
     let endpoint_explorer = Arc::new(MockEndpointExplorer::default());
     let api = test_harness.api();
@@ -61,6 +95,7 @@ async fn init(pool: PgPool) -> ZeroDpuEnv {
                 concurrent_explorations: 1,
                 run_interval: Duration::from_secs(1),
                 create_machines: Arc::new(true.into()),
+                dpu_mode: site_dpu_mode,
                 ..Default::default()
             },
             test_harness.test_meter.meter(),
@@ -78,6 +113,7 @@ async fn init(pool: PgPool) -> ZeroDpuEnv {
         pool,
         test_harness,
         underlay_segment,
+        admin_segment,
         host_inband_segment,
         site_explorer,
     }
@@ -87,21 +123,71 @@ async fn register_zero_dpu_expected_machine(
     env: &ZeroDpuEnv,
     managed_host: &ManagedHostConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    register_expected_machine_with_data(
+        env,
+        managed_host,
+        ExpectedMachineData {
+            dpu_mode: DpuMode::NoDpu,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Register the host's expected machine with the given data (the serial
+/// number is filled in from the fixture).
+async fn register_expected_machine_with_data(
+    env: &ZeroDpuEnv,
+    managed_host: &ManagedHostConfig,
+    mut data: ExpectedMachineData,
+) -> Result<(), Box<dyn std::error::Error>> {
+    data.serial_number = managed_host.serial.clone();
     let mut txn = env.pool.begin().await?;
     db::expected_machine::create(
         &mut txn,
         ExpectedMachine {
             id: None,
             bmc_mac_address: managed_host.bmc_mac_address,
-            data: ExpectedMachineData {
-                serial_number: managed_host.serial.clone(),
-                dpu_mode: DpuMode::NoDpu,
-                ..Default::default()
-            },
+            data,
         },
     )
     .await?;
     txn.commit().await?;
+
+    Ok(())
+}
+
+/// Drive a host through BMC discovery and registration: BMC DHCP on the
+/// underlay, exploration recorded, preingestion marked complete, and a
+/// second explorer pass to register the machine.
+async fn explore_and_ingest(
+    env: &ZeroDpuEnv,
+    mock_host: &ManagedHostConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let host_bmc_response = env
+        .api()
+        .discover_dhcp(
+            rpc::forge::DhcpDiscovery::builder(
+                mock_host.bmc_mac_address,
+                env.underlay_segment.relay_address,
+            )
+            .vendor_string("SomeVendor")
+            .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let host_bmc_ip = host_bmc_response.address.parse()?;
+
+    env.site_explorer.insert_endpoints(
+        mock_host
+            .exploration_results(Some(host_bmc_ip), &[])?
+            .into_endpoints(),
+    );
+    env.site_explorer.run_single_iteration().await?;
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::set_preingestion_complete(host_bmc_ip, &mut txn).await?;
+    txn.commit().await?;
+    env.site_explorer.run_single_iteration().await?;
 
     Ok(())
 }
@@ -557,6 +643,228 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
         predicted.boot_interface_id.as_deref(),
         Some("NIC.Embedded.1-1-1"),
         "the next exploration that resolves the id refreshes the prediction"
+    );
+    txn.rollback().await?;
+
+    Ok(())
+}
+
+/// The core of this change: a NIC-mode host's data port can carry an
+/// unowned `Admin`-segment interface left from when its DPU managed it.
+/// Ingest deletes that stale interface and predicts the NIC on
+/// `HostInband` instead, so its first DHCP lands on the right network.
+#[sqlx_test]
+async fn test_nic_mode_ingest_deletes_stale_admin_interface(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = init(pool).await;
+    let mock_host = zero_dpu_host();
+    let inband_mac = *mock_host.non_dpu_macs.first().unwrap();
+    register_expected_machine_with_data(
+        &env,
+        &mock_host,
+        ExpectedMachineData {
+            dpu_mode: DpuMode::NicMode,
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    // The port's DPU-managed past: an unowned interface on the `Admin`
+    // segment.
+    let mut txn = env.pool.begin().await?;
+    let stale = db::machine_interface::validate_existing_mac_and_create(
+        txn.as_mut(),
+        inband_mac,
+        &[env.admin_segment.relay_address],
+        None,
+        None,
+    )
+    .await?;
+    assert_eq!(stale.network_segment_type, Some(NetworkSegmentType::Admin));
+    txn.commit().await?;
+
+    explore_and_ingest(&env, &mock_host).await?;
+
+    let mut txn = env.pool.begin().await?;
+    // The stale `Admin` interface is gone...
+    assert!(
+        db::machine_interface::find_by_mac_address(txn.as_mut(), inband_mac)
+            .await?
+            .is_empty(),
+        "the stale Admin interface should be deleted, not adopted"
+    );
+    // ...and a `HostInband` prediction replaces it.
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, inband_mac)
+        .await?
+        .expect("a HostInband prediction should replace the deleted interface");
+    assert_eq!(
+        predicted.expected_network_segment_type,
+        NetworkSegmentType::HostInband
+    );
+    txn.rollback().await?;
+
+    // The NIC's first DHCP on `HostInband` promotes the prediction cleanly
+    // (no leftover Admin interface to collide with).
+    let response = env
+        .api()
+        .discover_dhcp(
+            rpc::forge::DhcpDiscovery::builder(inband_mac, env.host_inband_segment.relay_address)
+                .vendor_string("Bluefield")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    assert!(response.machine_id.is_some());
+
+    let mut txn = env.pool.begin().await?;
+    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), inband_mac).await?;
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(
+        interfaces[0].network_segment_type,
+        Some(NetworkSegmentType::HostInband)
+    );
+    assert!(interfaces[0].machine_id.is_some());
+    txn.rollback().await?;
+
+    Ok(())
+}
+
+/// The deletion keys on the host's effective mode, so a host made NIC-mode
+/// by the site-wide `dpu_mode` setting alone (no per-host declaration)
+/// deletes its stale `Admin` interface just the same.
+#[sqlx_test]
+async fn test_site_wide_nic_mode_deletes_stale_admin_interface(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = init_with_site_dpu_mode(pool, Some(DpuMode::NicMode)).await;
+    let mock_host = zero_dpu_host();
+    let inband_mac = *mock_host.non_dpu_macs.first().unwrap();
+    // No per-host declaration: the site-wide setting alone makes it NIC-mode.
+    register_expected_machine_with_data(&env, &mock_host, ExpectedMachineData::default()).await?;
+
+    let mut txn = env.pool.begin().await?;
+    let stale = db::machine_interface::validate_existing_mac_and_create(
+        txn.as_mut(),
+        inband_mac,
+        &[env.admin_segment.relay_address],
+        None,
+        None,
+    )
+    .await?;
+    assert_eq!(stale.network_segment_type, Some(NetworkSegmentType::Admin));
+    txn.commit().await?;
+
+    explore_and_ingest(&env, &mock_host).await?;
+
+    let mut txn = env.pool.begin().await?;
+    assert!(
+        db::machine_interface::find_by_mac_address(txn.as_mut(), inband_mac)
+            .await?
+            .is_empty(),
+        "site-wide NIC mode should delete the stale Admin interface too"
+    );
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, inband_mac)
+        .await?
+        .expect("a HostInband prediction should replace the deleted interface");
+    assert_eq!(
+        predicted.expected_network_segment_type,
+        NetworkSegmentType::HostInband
+    );
+    txn.rollback().await?;
+
+    Ok(())
+}
+
+/// A host flipped from DpuMode to NoDpu gets the same treatment as a
+/// NIC-mode flip: the deletion is scoped to hosts with no managed DPU, not
+/// to NIC mode specifically, so its stale `Admin` interface is deleted too.
+#[sqlx_test]
+async fn test_no_dpu_ingest_deletes_stale_admin_interface(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = init(pool).await;
+    let mock_host = zero_dpu_host();
+    let inband_mac = *mock_host.non_dpu_macs.first().unwrap();
+    register_zero_dpu_expected_machine(&env, &mock_host).await?;
+
+    let mut txn = env.pool.begin().await?;
+    let stale = db::machine_interface::validate_existing_mac_and_create(
+        txn.as_mut(),
+        inband_mac,
+        &[env.admin_segment.relay_address],
+        None,
+        None,
+    )
+    .await?;
+    assert_eq!(stale.network_segment_type, Some(NetworkSegmentType::Admin));
+    txn.commit().await?;
+
+    explore_and_ingest(&env, &mock_host).await?;
+
+    let mut txn = env.pool.begin().await?;
+    assert!(
+        db::machine_interface::find_by_mac_address(txn.as_mut(), inband_mac)
+            .await?
+            .is_empty(),
+        "a NoDpu host deletes its stale Admin interface too"
+    );
+    let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, inband_mac)
+        .await?
+        .expect("a HostInband prediction should replace the deleted interface");
+    assert_eq!(
+        predicted.expected_network_segment_type,
+        NetworkSegmentType::HostInband
+    );
+    txn.rollback().await?;
+
+    Ok(())
+}
+
+/// The deletion only targets `Admin` interfaces: an unowned interface
+/// already on `HostInband` is adopted, not deleted, even for a host with no
+/// managed DPU.
+#[sqlx_test]
+async fn test_zero_dpu_ingest_adopts_host_inband_interface(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = init(pool).await;
+    let mock_host = zero_dpu_host();
+    let inband_mac = *mock_host.non_dpu_macs.first().unwrap();
+    register_zero_dpu_expected_machine(&env, &mock_host).await?;
+
+    // The port already DHCP'd on HostInband before re-ingest.
+    let mut txn = env.pool.begin().await?;
+    let row = db::machine_interface::validate_existing_mac_and_create(
+        txn.as_mut(),
+        inband_mac,
+        &[env.host_inband_segment.relay_address],
+        None,
+        None,
+    )
+    .await?;
+    assert_eq!(
+        row.network_segment_type,
+        Some(NetworkSegmentType::HostInband)
+    );
+    txn.commit().await?;
+
+    explore_and_ingest(&env, &mock_host).await?;
+
+    let mut txn = env.pool.begin().await?;
+    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), inband_mac).await?;
+    assert_eq!(
+        interfaces.len(),
+        1,
+        "the HostInband interface should survive"
+    );
+    assert_eq!(
+        interfaces[0].network_segment_type,
+        Some(NetworkSegmentType::HostInband)
+    );
+    assert!(
+        interfaces[0].machine_id.is_some(),
+        "an existing HostInband interface is adopted, not deleted"
     );
     txn.rollback().await?;
 

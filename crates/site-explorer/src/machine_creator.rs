@@ -26,7 +26,7 @@ use itertools::Itertools;
 use librms::RmsApi;
 use mac_address::MacAddress;
 use model::bmc_info::BmcInfo;
-use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
+use model::expected_machine::{DpuMode, ExpectedMachine, ExpectedMachineData};
 use model::hardware_info::HardwareInfo;
 use model::machine::machine_id::host_id_from_dpu_hardware_info;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -312,6 +312,15 @@ impl MachineCreator {
         // already.
         let mac_addresses = host_mac_addresses_for_predicted_machine(report, machine_data);
 
+        // A host with no managed DPU -- its DPU flipped to a plain NIC, or
+        // no DPU hardware at all -- puts its data port on `HostInband`,
+        // not the `Admin` network a managed DPU used. `is_dpu_managed()`
+        // is true only for `DpuMode::DpuMode`, so this covers both the
+        // `NicMode` and `NoDpu` cases.
+        let host_has_unmanaged_nic =
+            !DpuMode::resolve(machine_data.map(|data| data.dpu_mode), self.config.dpu_mode)
+                .is_dpu_managed();
+
         // Resolve each MAC's Redfish interface id from the live report up
         // front (`generate_machine_id` below takes a mutable borrow of the
         // report that lives for the rest of this function).
@@ -391,6 +400,35 @@ impl MachineCreator {
         // Create and attach a non-DPU machine_interface to the host for every MAC address we see in
         // the exploration report
         for mac_address in mac_addresses {
+            // A host with no managed DPU can still have an unowned
+            // `Admin`-segment interface left from when a DPU managed the
+            // port (e.g. a force-delete that kept interfaces). Adopting it
+            // would pin the MAC to the `Admin` network, and DHCP would
+            // reject the host's `HostInband` lease as a segment mismatch.
+            // Delete it instead, so the host predicts and leases on
+            // `HostInband`; `delete` preserves the boot pair in
+            // `retained_boot_interfaces` for the new interface to recover.
+            if host_has_unmanaged_nic {
+                let stale_admin_interfaces =
+                    db::machine_interface::find_by_mac_address(&mut *txn, mac_address)
+                        .await?
+                        .into_iter()
+                        .filter(|interface| {
+                            interface.machine_id.is_none()
+                                && interface.attached_dpu_machine_id.is_none()
+                                && interface.network_segment_type == Some(NetworkSegmentType::Admin)
+                        })
+                        .collect::<Vec<_>>();
+                for stale in stale_admin_interfaces {
+                    tracing::info!(
+                        %mac_address,
+                        %machine_id,
+                        "Deleting stale Admin interface for a NIC-mode host; it belongs on HostInband"
+                    );
+                    db::machine_interface::delete(&stale.id, &mut *txn).await?;
+                }
+            }
+
             if let Some(machine_interface) =
                 db::machine_interface::find_by_mac_address(&mut *txn, mac_address)
                     .await?
@@ -413,7 +451,11 @@ impl MachineCreator {
                         id: mac_address.to_string(),
                     });
                 } else {
-                    // ...If it has no MachineId, the host must have DHCP'd before site-explorer ran. Set it to the new machine ID.
+                    // ...If it has no MachineId, the host must have DHCP'd before site-explorer ran, so adopt it.
+                    // NOTE: this is the branch the delete-above guards. A no-managed-DPU host's stale `Admin`
+                    // interface is unowned (force-delete NULLs `machine_id`), so without that deletion it would
+                    // land here and be adopted onto `Admin` -- wedging the host. By here, the only unowned
+                    // interface left is one on a segment the host keeps. Set it to the new machine ID.
                     tracing::info!(%mac_address, %machine_id, "Migrating unowned machine_interface to new managed host");
                     db::machine_interface::associate_interface_with_machine(
                         &machine_interface.id,

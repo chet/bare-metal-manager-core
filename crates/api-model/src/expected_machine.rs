@@ -50,9 +50,10 @@ pub enum DpuMode {
 }
 
 impl DpuMode {
-    /// Returns `true` when the host is not being managed as a host with DPUs
-    /// (`NicMode` or `NoDpu`). Used by site-explorer and the state
-    /// controller to skip DPU-specific work.
+    /// Returns `true` when the host is managed as a host with DPUs (the
+    /// `DpuMode` variant); `false` for `NicMode` or `NoDpu`. Site-explorer
+    /// and the state controller use it to skip DPU-specific work for hosts
+    /// with no managed DPU.
     pub fn is_dpu_managed(&self) -> bool {
         matches!(self, DpuMode::DpuMode)
     }
