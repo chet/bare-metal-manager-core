@@ -22,8 +22,8 @@ use std::path::Path;
 
 use carbide_test_support::Outcome::*;
 use carbide_test_support::{scenarios, value_scenarios};
-use libmlx::runner::command_builder::{CommandBuilder, CommandSpec};
-use libmlx::runner::exec_options::ExecOptions;
+use libmlx::mlxconfig_runner::command_builder::{CommandBuilder, CommandSpec};
+use libmlx::mlxconfig_runner::exec_options::ExecOptions;
 
 use super::common;
 

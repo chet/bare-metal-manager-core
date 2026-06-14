@@ -15,13 +15,13 @@
  * limitations under the License.
  */
 
-pub mod applier;
-pub mod command_builder;
-pub mod error;
-pub mod exec_options;
-pub mod executor;
-pub mod json_parser;
-pub mod result_types;
-#[allow(clippy::module_inception)]
-pub mod runner;
-pub mod traits;
+mod mlxconfig_runner {
+    mod command_builder_tests;
+    mod common;
+    mod exec_options_tests;
+    mod executor_tests;
+    mod json_parser_tests;
+    mod result_types_tests;
+    mod runner_integration_tests;
+    mod traits_tests;
+}

@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-// tests/runner_integration_tests.rs
+// tests/mlxconfig_runner/runner_integration_tests.rs
 // Integration tests for MlxConfigRunner functionality
 
 use std::fs;
@@ -23,9 +23,9 @@ use std::time::Duration;
 
 use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
-use libmlx::runner::error::MlxRunnerError;
-use libmlx::runner::exec_options::ExecOptions;
-use libmlx::runner::runner::MlxConfigRunner;
+use libmlx::mlxconfig_runner::MlxConfigRunner;
+use libmlx::mlxconfig_runner::error::MlxRunnerError;
+use libmlx::mlxconfig_runner::exec_options::ExecOptions;
 
 use super::common;
 

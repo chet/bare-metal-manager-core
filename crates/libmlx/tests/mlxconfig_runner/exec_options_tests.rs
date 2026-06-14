@@ -21,7 +21,7 @@
 use std::time::Duration;
 
 use carbide_test_support::value_scenarios;
-use libmlx::runner::exec_options::{ExecOptions, is_destructive_variable};
+use libmlx::mlxconfig_runner::exec_options::{ExecOptions, is_destructive_variable};
 
 // Assert `options` holds the documented default configuration. `new()` is meant to
 // be identical to `default()`, so both constructors are checked through here.

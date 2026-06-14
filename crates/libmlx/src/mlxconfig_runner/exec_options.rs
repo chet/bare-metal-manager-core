@@ -23,6 +23,8 @@
 
 use std::time::Duration;
 
+use carbide_utils::cmd::CommandExecutionOptions;
+
 // DESTRUCTIVE_VARIABLES are variables that may potentially require
 // confirmation before modification (and will be enforced if the
 // runner is configured with confirm_destructive: true).
@@ -151,6 +153,16 @@ impl ExecOptions {
     pub fn with_confirm_destructive(mut self, confirm_destructive: bool) -> Self {
         self.confirm_destructive = confirm_destructive;
         self
+    }
+
+    pub fn command_execution_options(&self) -> CommandExecutionOptions {
+        CommandExecutionOptions::new()
+            .with_timeout(self.timeout)
+            .with_retries(self.retries)
+            .with_retry_delay(self.retry_delay)
+            .with_max_retry_delay(self.max_retry_delay)
+            .with_retry_multiplier(self.retry_multiplier)
+            .with_verbose(self.verbose)
     }
 }
 

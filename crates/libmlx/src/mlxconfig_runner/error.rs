@@ -21,6 +21,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use carbide_utils::cmd::CmdError;
 use thiserror::Error;
 
 use crate::variables::value::MlxValueError;
@@ -163,6 +164,33 @@ impl From<MlxValueError> for MlxRunnerError {
             variable_name: "unknown".to_string(),
             value: "unknown".to_string(),
             error,
+        }
+    }
+}
+
+impl From<CmdError> for MlxRunnerError {
+    fn from(error: CmdError) -> Self {
+        match error {
+            CmdError::CommandExecution {
+                command,
+                exit_code,
+                stdout,
+                stderr,
+            } => Self::CommandExecution {
+                command,
+                exit_code,
+                stdout,
+                stderr,
+            },
+            CmdError::Timeout { command, duration } => Self::Timeout { command, duration },
+            CmdError::CommandIo { source, .. } => Self::Io(source),
+            CmdError::Subprocess(command, args, output) => Self::CommandExecution {
+                command: format!("{command} {}", args.join(" ")),
+                exit_code: None,
+                stdout: String::new(),
+                stderr: output,
+            },
+            other => Self::GenericError(other.to_string()),
         }
     }
 }

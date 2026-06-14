@@ -22,7 +22,7 @@
 
 use thiserror::Error;
 
-use crate::runner::error::MlxRunnerError;
+use crate::mlxconfig_runner::MlxRunnerError;
 use crate::variables::value::MlxValueError;
 
 #[derive(Debug, Error)]

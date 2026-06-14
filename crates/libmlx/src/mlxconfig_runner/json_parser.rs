@@ -26,9 +26,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::runner::error::MlxRunnerError;
-use crate::runner::exec_options::ExecOptions;
-use crate::runner::result_types::{QueriedDeviceInfo, QueriedVariable, QueryResult};
+use crate::mlxconfig_runner::result_types::{QueriedDeviceInfo, QueriedVariable, QueryResult};
+use crate::mlxconfig_runner::{ExecOptions, MlxRunnerError};
 use crate::variables::registry::MlxVariableRegistry;
 use crate::variables::spec::MlxVariableSpec;
 use crate::variables::value::MlxConfigValue;
@@ -166,7 +165,9 @@ impl<'a> JsonResponseParser<'a> {
 
         for (json_name, json_var) in json_vars {
             // Check if this is an array element like "ARRAY[0]".
-            if let Some((base_name, _)) = crate::runner::traits::parse_array_index(json_name)? {
+            if let Some((base_name, _)) =
+                crate::mlxconfig_runner::traits::parse_array_index(json_name)?
+            {
                 // Skip if we already processed this array.
                 if processed_arrays.contains(&base_name) {
                     continue;
@@ -586,7 +587,7 @@ impl<'a> JsonResponseParser<'a> {
     // get_array_size gets the array size from a
     // variable spec for doing array processing.
     fn get_array_size(&self, spec: &MlxVariableSpec) -> Result<usize, MlxRunnerError> {
-        crate::runner::traits::get_array_size_from_spec(spec)
+        crate::mlxconfig_runner::traits::get_array_size_from_spec(spec)
     }
 }
 

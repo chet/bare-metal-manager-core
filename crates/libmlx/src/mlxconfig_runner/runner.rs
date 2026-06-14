@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-// src/runner.rs
+// src/mlxconfig_runner/runner.rs
 // Main mlxconfig command runner, pulling together all of the goodies
 // we've defined in this crate, as well as the mlxconfig-variables and
 // mlxconfig-registry crates, to have a type-safe, registry-driven
@@ -26,15 +26,15 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::runner::command_builder::CommandBuilder;
-use crate::runner::error::MlxRunnerError;
-use crate::runner::exec_options::{ExecOptions, is_destructive_variable};
-use crate::runner::executor::CommandExecutor;
-use crate::runner::json_parser::JsonResponseParser;
-use crate::runner::result_types::{
+use crate::mlxconfig_runner::MlxRunnerError;
+use crate::mlxconfig_runner::command_builder::CommandBuilder;
+use crate::mlxconfig_runner::exec_options::{ExecOptions, is_destructive_variable};
+use crate::mlxconfig_runner::executor::CommandExecutor;
+use crate::mlxconfig_runner::json_parser::JsonResponseParser;
+use crate::mlxconfig_runner::result_types::{
     ComparisonResult, PlannedChange, QueriedDeviceInfo, QueryResult, SyncResult, VariableChange,
 };
-use crate::runner::traits::{MlxConfigQueryable, MlxConfigSettable};
+use crate::mlxconfig_runner::traits::{MlxConfigQueryable, MlxConfigSettable};
 use crate::variables::registry::MlxVariableRegistry;
 use crate::variables::value::MlxConfigValue;
 

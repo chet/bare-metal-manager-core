@@ -27,12 +27,10 @@ use libmlx::firmware::config::FirmwareFlasherProfile;
 use libmlx::firmware::flasher::FirmwareFlasher;
 use libmlx::lockdown::error::MlxResult;
 use libmlx::lockdown::lockdown::{LockdownManager, StatusReport};
+use libmlx::mlxconfig_runner::{ComparisonResult, MlxConfigApplier, MlxConfigRunner, SyncResult};
 use libmlx::profile::error::MlxProfileError;
 use libmlx::profile::serialization::SerializableProfile;
 use libmlx::registry::registries;
-use libmlx::runner::applier::MlxConfigApplier;
-use libmlx::runner::result_types::{ComparisonResult, SyncResult};
-use libmlx::runner::runner::MlxConfigRunner;
 use rpc::protos::mlx_device as mlx_device_pb;
 use scout::CarbideClientResult;
 

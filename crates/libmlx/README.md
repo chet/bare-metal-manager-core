@@ -220,7 +220,7 @@ High-level Rust wrapper around the `mlxconfig` CLI tool with type-safe, registry
 ### Quick Start
 
 ```rust
-use libmlx::runner::runner::MlxConfigRunner;
+use libmlx::mlxconfig_runner::runner::MlxConfigRunner;
 use libmlx::registry::registries;
 
 let registry = registries::get("mlx_generic").unwrap();
@@ -287,7 +287,7 @@ runner.set(&[
 ### Execution Options
 
 ```rust
-use libmlx::runner::exec_options::ExecOptions;
+use libmlx::mlxconfig_runner::exec_options::ExecOptions;
 use std::time::Duration;
 
 let options = ExecOptions::default()

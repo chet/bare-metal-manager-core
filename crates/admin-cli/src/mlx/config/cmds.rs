@@ -16,7 +16,7 @@
  */
 
 use ::rpc::admin_cli::OutputFormat;
-use libmlx::runner::result_types::{ComparisonResult, QueryResult, SyncResult};
+use libmlx::mlxconfig_runner::{ComparisonResult, QueryResult, SyncResult};
 use prettytable::{Cell, Row, Table};
 use rpc::protos::mlx_device as mlx_device_pb;
 

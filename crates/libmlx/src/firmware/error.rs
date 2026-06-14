@@ -42,7 +42,7 @@ pub enum FirmwareError {
     FlintError(#[from] crate::lockdown::error::MlxError),
 
     #[error("mlxconfig error: {0}")]
-    MlxConfigError(#[from] crate::runner::error::MlxRunnerError),
+    MlxConfigError(#[from] crate::mlxconfig_runner::MlxRunnerError),
 
     #[error("Firmware reset failed: {0}")]
     ResetFailed(String),

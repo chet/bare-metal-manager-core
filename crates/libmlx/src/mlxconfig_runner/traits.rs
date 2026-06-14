@@ -32,7 +32,7 @@ use std::collections::HashMap;
 
 use regex::Regex;
 
-use crate::runner::error::MlxRunnerError;
+use crate::mlxconfig_runner::MlxRunnerError;
 use crate::variables::registry::MlxVariableRegistry;
 use crate::variables::spec::MlxVariableSpec;
 use crate::variables::value::{IntoMlxValue, MlxConfigValue, MlxValueType};

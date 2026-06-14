@@ -22,10 +22,10 @@ use std::fs;
 
 use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
-use libmlx::runner::error::MlxRunnerError;
-use libmlx::runner::exec_options::ExecOptions;
-use libmlx::runner::json_parser::JsonResponseParser;
-use libmlx::runner::result_types::QueryResult;
+use libmlx::mlxconfig_runner::error::MlxRunnerError;
+use libmlx::mlxconfig_runner::exec_options::ExecOptions;
+use libmlx::mlxconfig_runner::json_parser::JsonResponseParser;
+use libmlx::mlxconfig_runner::result_types::QueryResult;
 use libmlx::variables::registry::MlxVariableRegistry;
 use libmlx::variables::value::MlxValueType;
 use serde_json::json;
@@ -169,7 +169,10 @@ fn test_device_mismatch_error() {
     );
 
     assert!(result.is_err());
-    if let Err(libmlx::runner::error::MlxRunnerError::DeviceMismatch { expected, actual }) = result
+    if let Err(libmlx::mlxconfig_runner::error::MlxRunnerError::DeviceMismatch {
+        expected,
+        actual,
+    }) = result
     {
         assert_eq!(expected, "02:00.0");
         assert_eq!(actual, "01:00.0");

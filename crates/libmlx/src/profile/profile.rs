@@ -24,11 +24,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::mlxconfig_runner::{ComparisonResult, ExecOptions, MlxConfigRunner, SyncResult};
 use crate::profile::error::MlxProfileError;
 use crate::profile::serialization::SerializableProfile;
-use crate::runner::exec_options::ExecOptions;
-use crate::runner::result_types::{ComparisonResult, SyncResult};
-use crate::runner::runner::MlxConfigRunner;
 use crate::variables::registry::MlxVariableRegistry;
 use crate::variables::value::{IntoMlxValue, MlxConfigValue};
 

@@ -36,6 +36,7 @@ test-support = [
 [dependencies]
 carbide-network = { path = "../network" }
 
+backon = { workspace = true }
 byte-unit = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
@@ -50,6 +51,7 @@ serde = { workspace = true, features = ["derive"] }
 sqlx = { workspace = true, features = ["postgres"], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+wait-timeout = { workspace = true }
 
 [dev-dependencies]
 carbide-test-support = { path = "../test-support" }

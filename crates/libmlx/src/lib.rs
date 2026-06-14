@@ -19,7 +19,7 @@ pub mod device;
 pub mod embedded;
 pub mod firmware;
 pub mod lockdown;
+pub mod mlxconfig_runner;
 pub mod profile;
 pub mod registry;
-pub mod runner;
 pub mod variables;

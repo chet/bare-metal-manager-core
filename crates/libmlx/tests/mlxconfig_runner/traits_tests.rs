@@ -20,7 +20,7 @@
 
 use carbide_test_support::Outcome::*;
 use carbide_test_support::scenarios;
-use libmlx::runner::traits::{self, MlxConfigQueryable, MlxConfigSettable};
+use libmlx::mlxconfig_runner::traits::{self, MlxConfigQueryable, MlxConfigSettable};
 use libmlx::variables::value::MlxValueType;
 
 use super::common;
@@ -241,7 +241,10 @@ fn test_mlx_config_settable_variable_not_found() {
     let result = assignments.to_config_values(&registry);
     assert!(result.is_err());
 
-    if let Err(libmlx::runner::error::MlxRunnerError::VariableNotFound { variable_name }) = result {
+    if let Err(libmlx::mlxconfig_runner::error::MlxRunnerError::VariableNotFound {
+        variable_name,
+    }) = result
+    {
         assert_eq!(variable_name, "NONEXISTENT_VAR");
     } else {
         panic!("Expected VariableNotFound error");
@@ -356,7 +359,10 @@ fn test_mlx_config_queryable_variable_not_found() {
     let result = variables.to_variable_names(&registry);
 
     assert!(result.is_err());
-    if let Err(libmlx::runner::error::MlxRunnerError::VariableNotFound { variable_name }) = result {
+    if let Err(libmlx::mlxconfig_runner::error::MlxRunnerError::VariableNotFound {
+        variable_name,
+    }) = result
+    {
         assert_eq!(variable_name, "NONEXISTENT_VAR");
     } else {
         panic!("Expected VariableNotFound error");
@@ -538,8 +544,10 @@ fn test_build_sparse_array_value_out_of_bounds() {
     let result = traits::build_sparse_array_value(gpio_var, indices);
 
     assert!(result.is_err());
-    if let Err(libmlx::runner::error::MlxRunnerError::ArraySizeMismatch {
-        expected, found, ..
+    if let Err(libmlx::mlxconfig_runner::error::MlxRunnerError::ArraySizeMismatch {
+        expected,
+        found,
+        ..
     }) = result
     {
         assert_eq!(expected, 4);
@@ -715,7 +723,7 @@ fn test_mlx_config_queryable_array_index_out_of_bounds() {
     let result = variables.to_variable_names(&registry);
 
     assert!(result.is_err());
-    if let Err(libmlx::runner::error::MlxRunnerError::ArraySizeMismatch {
+    if let Err(libmlx::mlxconfig_runner::error::MlxRunnerError::ArraySizeMismatch {
         variable_name,
         expected,
         found,
@@ -738,7 +746,10 @@ fn test_mlx_config_queryable_array_index_base_variable_not_found() {
     let result = variables.to_variable_names(&registry);
 
     assert!(result.is_err());
-    if let Err(libmlx::runner::error::MlxRunnerError::VariableNotFound { variable_name }) = result {
+    if let Err(libmlx::mlxconfig_runner::error::MlxRunnerError::VariableNotFound {
+        variable_name,
+    }) = result
+    {
         assert_eq!(variable_name, "NONEXISTENT_ARRAY");
     } else {
         panic!("Expected VariableNotFound error");

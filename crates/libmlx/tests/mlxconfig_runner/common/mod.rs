@@ -18,7 +18,7 @@
 // tests/common/mod.rs
 // Shared test utilities for mlxconfig-runner tests.
 
-use libmlx::runner::result_types::QueriedDeviceInfo;
+use libmlx::mlxconfig_runner::result_types::QueriedDeviceInfo;
 use libmlx::variables::registry::MlxVariableRegistry;
 use libmlx::variables::spec::MlxVariableSpec;
 use libmlx::variables::variable::MlxConfigVariable;

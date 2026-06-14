@@ -21,7 +21,7 @@
 use std::time::Duration;
 
 use carbide_test_support::value_scenarios;
-use libmlx::runner::result_types::{
+use libmlx::mlxconfig_runner::result_types::{
     ComparisonResult, PlannedChange, QueriedDeviceInfo, QueriedVariable, QueryResult, SyncResult,
     VariableChange,
 };

@@ -23,10 +23,9 @@
 
 use std::path::Path;
 
-use crate::runner::command_builder::CommandSpec;
-use crate::runner::error::MlxRunnerError;
-use crate::runner::exec_options::ExecOptions;
-use crate::runner::executor::CommandExecutor;
+use crate::mlxconfig_runner::command_builder::CommandSpec;
+use crate::mlxconfig_runner::executor::CommandExecutor;
+use crate::mlxconfig_runner::{ExecOptions, MlxRunnerError};
 
 // MlxConfigApplier handles mlxconfig apply and reset operations.
 pub struct MlxConfigApplier {

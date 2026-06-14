@@ -38,8 +38,7 @@ use crate::firmware::config::{FirmwareFlasherProfile, FirmwareSpec, FlashSpec};
 use crate::firmware::error::{FirmwareError, FirmwareResult};
 use crate::firmware::reset::{DEFAULT_RESET_LEVEL, MlxFwResetRunner};
 use crate::lockdown::runner::FlintRunner;
-use crate::runner::applier::MlxConfigApplier;
-use crate::runner::exec_options::ExecOptions;
+use crate::mlxconfig_runner::{ExecOptions, MlxConfigApplier};
 
 // FirmwareFlasher manages the firmware flash lifecycle for Mellanox NICs.
 // Constructed via new(), which integrates validation by discovering the

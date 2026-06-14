@@ -23,10 +23,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use carbide_test_support::{Check, check_values, value_scenarios};
-use libmlx::runner::command_builder::{CommandBuilder, CommandSpec};
-use libmlx::runner::error::MlxRunnerError;
-use libmlx::runner::exec_options::ExecOptions;
-use libmlx::runner::executor::CommandExecutor;
+use libmlx::mlxconfig_runner::command_builder::{CommandBuilder, CommandSpec};
+use libmlx::mlxconfig_runner::error::MlxRunnerError;
+use libmlx::mlxconfig_runner::exec_options::ExecOptions;
+use libmlx::mlxconfig_runner::executor::CommandExecutor;
 
 #[test]
 fn test_create_temp_file() {

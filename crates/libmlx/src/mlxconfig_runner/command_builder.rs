@@ -20,63 +20,11 @@
 // argument formatting and assignment generation.
 
 use std::path::Path;
-use std::process::Command;
 
-use crate::runner::error::MlxRunnerError;
-use crate::runner::exec_options::ExecOptions;
+pub use carbide_utils::cmd::CommandSpec;
+
+use crate::mlxconfig_runner::{ExecOptions, MlxRunnerError};
 use crate::variables::value::{MlxConfigValue, MlxValueType};
-
-// CommandSpec represents the parameters needed to build a Command.
-// This allows us to recreate Command instances for retry logic since
-// Command doesn't implement Clone.
-#[derive(Debug, Clone)]
-pub struct CommandSpec {
-    pub program: String,
-    pub args: Vec<String>,
-}
-
-impl CommandSpec {
-    // Creates a new CommandSpec with the given program and arguments.
-    pub fn new<P: Into<String>>(program: P) -> Self {
-        Self {
-            program: program.into(),
-            args: Vec::new(),
-        }
-    }
-
-    // Adds a single argument to the command.
-    pub fn arg<A: Into<String>>(mut self, arg: A) -> Self {
-        self.args.push(arg.into());
-        self
-    }
-
-    // Adds multiple arguments to the command.
-    pub fn args<I, A>(mut self, args: I) -> Self
-    where
-        I: IntoIterator<Item = A>,
-        A: Into<String>,
-    {
-        self.args.extend(args.into_iter().map(|a| a.into()));
-        self
-    }
-
-    // Creates a Command from this CommandSpec.
-    pub fn to_command(&self) -> Command {
-        let mut command = Command::new(&self.program);
-        command.args(&self.args);
-        command
-    }
-}
-
-impl std::fmt::Display for CommandSpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.args.is_empty() {
-            write!(f, "{}", self.program)
-        } else {
-            write!(f, "{} {}", self.program, self.args.join(" "))
-        }
-    }
-}
 
 // CommandBuilder handles the construction of mlxconfig CLI commands
 // for different operations (query, set) with proper argument formatting.

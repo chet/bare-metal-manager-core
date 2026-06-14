@@ -33,12 +33,9 @@ use crate::firmware::config::{FirmwareFlasherProfile, FirmwareSpec, FlashSpec};
 use crate::firmware::credentials::Credentials;
 use crate::firmware::flasher::FirmwareFlasher;
 use crate::lockdown::cmd::cmds::handle_lockdown;
+use crate::mlxconfig_runner::{ExecOptions, MlxConfigRunner, MlxRunnerError, QueryResult};
 use crate::profile::profile::MlxConfigProfile;
 use crate::registry::registries;
-use crate::runner::error::MlxRunnerError;
-use crate::runner::exec_options::ExecOptions;
-use crate::runner::result_types::QueryResult;
-use crate::runner::runner::MlxConfigRunner;
 use crate::variables::registry::MlxVariableRegistry;
 use crate::variables::spec::MlxVariableSpec;
 use crate::variables::variable::MlxConfigVariable;
@@ -1137,7 +1134,7 @@ async fn run_firmware_command(
         FirmwareAction::ConfigReset { device } => {
             let exec_options = ExecOptions::new().with_dry_run(dry_run);
             let applier =
-                crate::runner::applier::MlxConfigApplier::with_options(&device, exec_options);
+                crate::mlxconfig_runner::MlxConfigApplier::with_options(&device, exec_options);
             applier.reset_config()?;
 
             tracing::info!("Configuration reset complete");
