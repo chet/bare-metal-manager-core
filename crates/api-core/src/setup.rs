@@ -270,6 +270,40 @@ pub fn create_ipmi_tool(
 /// Configure and create a postgres connection pool
 ///
 /// This connects to the database to verify settings
+/// Builds the pool's options from the operator's pool settings, rejecting
+/// zero-valued durations up front.
+fn database_pool_options(
+    config: &CarbideConfig,
+) -> eyre::Result<sqlx::pool::PoolOptions<sqlx::Postgres>> {
+    for (name, value) in [
+        (
+            "database_pool_acquire_timeout",
+            config.database_pool_acquire_timeout,
+        ),
+        (
+            "database_pool_idle_timeout",
+            config.database_pool_idle_timeout,
+        ),
+        (
+            "database_pool_max_lifetime",
+            config.database_pool_max_lifetime,
+        ),
+    ] {
+        if value.is_zero() {
+            eyre::bail!("{name} must be greater than zero");
+        }
+    }
+
+    Ok(sqlx::pool::PoolOptions::new()
+        .max_connections(config.max_database_connections)
+        // Lifecycle settings are operator-configurable; each `database_pool_*`
+        // config field documents what it bounds. The defaults are sqlx's own,
+        // so exposing them changes no behavior -- tuning belongs to the site.
+        .acquire_timeout(config.database_pool_acquire_timeout)
+        .idle_timeout(Some(config.database_pool_idle_timeout))
+        .max_lifetime(Some(config.database_pool_max_lifetime)))
+}
+
 pub(crate) async fn create_and_connect_postgres_pool(
     config: &CarbideConfig,
 ) -> eyre::Result<PgPool> {
@@ -289,8 +323,7 @@ pub(crate) async fn create_and_connect_postgres_pool(
                 .ssl_root_cert(&tls_config.root_cafile_path);
         }
     }
-    Ok(sqlx::pool::PoolOptions::new()
-        .max_connections(config.max_database_connections)
+    Ok(database_pool_options(config)?
         .connect_with(database_connect_options)
         .await?)
 }
@@ -2241,5 +2274,58 @@ mod tests {
 
         assert!(msg.contains("alpha"), "expected `alpha` in {msg}");
         assert!(msg.contains("beta"), "expected `beta` in {msg}");
+    }
+
+    /// The pool builder rejects zero-valued lifecycle settings before it
+    /// touches the database, naming the offending field.
+    #[test]
+    fn zero_database_pool_durations_are_rejected_at_startup() {
+        type ZeroOut = fn(&mut CarbideConfig);
+        let cases: [(&str, ZeroOut); 3] = [
+            ("database_pool_acquire_timeout", |config| {
+                config.database_pool_acquire_timeout = std::time::Duration::ZERO
+            }),
+            ("database_pool_idle_timeout", |config| {
+                config.database_pool_idle_timeout = std::time::Duration::ZERO
+            }),
+            ("database_pool_max_lifetime", |config| {
+                config.database_pool_max_lifetime = std::time::Duration::ZERO
+            }),
+        ];
+        for (field, zero_out) in cases {
+            let mut config = crate::test_support::default_config::get();
+            zero_out(&mut config);
+            let err = database_pool_options(&config)
+                .expect_err("a zero-valued pool duration must be rejected");
+            assert!(
+                err.to_string().contains(field),
+                "error must name `{field}`, got: {err}"
+            );
+        }
+    }
+
+    /// The configured values are forwarded onto the pool builder.
+    #[test]
+    fn database_pool_options_forwards_the_configured_values() {
+        let mut config = crate::test_support::default_config::get();
+        config.max_database_connections = 7;
+        config.database_pool_acquire_timeout = std::time::Duration::from_secs(15);
+        config.database_pool_idle_timeout = std::time::Duration::from_secs(20 * 60);
+        config.database_pool_max_lifetime = std::time::Duration::from_secs(45 * 60);
+
+        let options = database_pool_options(&config).expect("non-zero settings build");
+        assert_eq!(options.get_max_connections(), 7);
+        assert_eq!(
+            options.get_acquire_timeout(),
+            std::time::Duration::from_secs(15)
+        );
+        assert_eq!(
+            options.get_idle_timeout(),
+            Some(std::time::Duration::from_secs(20 * 60))
+        );
+        assert_eq!(
+            options.get_max_lifetime(),
+            Some(std::time::Duration::from_secs(45 * 60))
+        );
     }
 }
