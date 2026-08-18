@@ -115,9 +115,12 @@ pub(crate) async fn set_primary_interface(
 /// Moves the database primary to the selected interface and records that exact
 /// row as the host's desired boot target.
 ///
-/// The transaction locks admin segments, host interfaces, and then the host
-/// machine in the same order as Site Explorer. Once it commits, the machine
-/// controller owns the Redfish write and any reboot needed to converge it.
+/// The transaction locks the related admin segments, host interfaces, and host
+/// machine, then ends with a live-Instance fence. The primary-move path may
+/// update Instance network configuration earlier, but the final fence makes
+/// deletion authoritative for every write in the transaction. Once it commits,
+/// the machine controller owns the Redfish write and any reboot needed to
+/// converge it.
 async fn set_primary_interface_core(
     api: &Api,
     host_machine_id: MachineId,
@@ -293,6 +296,15 @@ async fn set_primary_interface_core(
             .await?;
     } else {
         db::machine_desired_boot_interface::set(&mut txn, &host_machine_id, &boot_target).await?;
+    }
+
+    if let Some(instance) = &instance {
+        // Every operator write on an assigned host, including a forced
+        // boot-target reconciliation, stops once Instance deletion begins.
+        // This terminal fence makes a deletion that already won roll back every
+        // earlier write together; otherwise deletion waits for this transaction
+        // to commit.
+        db::instance::ensure_live_for_config_update(&mut txn, instance.id).await?;
     }
 
     txn.commit().await?;
