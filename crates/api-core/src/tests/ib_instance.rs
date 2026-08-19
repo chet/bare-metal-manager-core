@@ -21,15 +21,19 @@ use carbide_ib_fabric::config::IBFabricConfig;
 use carbide_ib_fabric::ib::{Filter, IBFabric, IBFabricManager};
 use carbide_instrument::testing::MetricsCapture;
 use carbide_uuid::infiniband::IBPartitionId;
+use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::MachineId;
 use common::api_fixtures::ib_partition::{DEFAULT_TENANT, create_ib_partition};
 use common::api_fixtures::instance::{config_for_ib_config, create_instance_with_ib_config};
-use common::api_fixtures::{TestEnv, create_managed_host};
+use common::api_fixtures::{TestEnv, TestManagedHost, create_managed_host};
+use config_version::ConfigVersion;
 use db::ObjectColumnFilter;
 use model::ib::DEFAULT_IB_FABRIC_NAME;
+use model::ib_partition::PartitionKey;
 use model::machine::ManagedHostState;
+use model::machine::machine_search_config::MachineSearchConfig;
 use rpc::forge::forge_server::Forge;
-use rpc::forge::{IbPartitionStatus, TenantState};
+use rpc::forge::{AdminForceDeleteMachineRequest, IbPartitionStatus, TenantState};
 use tonic::Request;
 
 use crate::api::Api;
@@ -67,6 +71,404 @@ fn assert_successful_ufm_changes(metrics: &MetricsCapture, operation: &str, mini
         observed >= minimum,
         "expected at least {minimum} successful {operation} changes, observed {observed}"
     );
+}
+
+struct IbTransitionFixture {
+    env: TestEnv,
+    managed_host: TestManagedHost,
+    instance_id: InstanceId,
+    initial_config_version: ConfigVersion,
+    requested_config: rpc::InstanceConfig,
+    metadata: rpc::Metadata,
+    original_partition_id: IBPartitionId,
+    original_pkey: PartitionKey,
+    original_guid: String,
+}
+
+fn one_port_ib_config(partition_id: IBPartitionId) -> rpc::InstanceInfinibandConfig {
+    rpc::InstanceInfinibandConfig {
+        ib_interfaces: vec![rpc::InstanceIbInterfaceConfig {
+            function_type: rpc::InterfaceFunctionType::Physical as i32,
+            virtual_function_id: None,
+            ib_partition_id: Some(partition_id),
+            device: "MT2910 Family [ConnectX-7]".to_string(),
+            vendor: None,
+            device_instance: 0,
+        }],
+    }
+}
+
+async fn create_ib_transition_fixture(pool: sqlx::PgPool) -> IbTransitionFixture {
+    let mut config = common::api_fixtures::get_config();
+    config.ib_config = Some(IBFabricConfig {
+        enabled: true,
+        max_partition_per_tenant: 16,
+        ..Default::default()
+    });
+    let env = common::api_fixtures::create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config),
+    )
+    .await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let (original_partition_id, original_partition) = create_ib_partition(
+        &env,
+        "transition-original".to_string(),
+        DEFAULT_TENANT.to_string(),
+    )
+    .await;
+    let (requested_partition_id, _) = create_ib_partition(
+        &env,
+        "transition-requested".to_string(),
+        DEFAULT_TENANT.to_string(),
+    )
+    .await;
+    let original_pkey = original_partition
+        .status
+        .as_ref()
+        .and_then(|status| status.pkey.as_deref())
+        .expect("ready fixture partition must have a PKey")
+        .parse()
+        .expect("fixture PKey must be valid");
+
+    let managed_host = create_managed_host(&env).await;
+    let (test_instance, instance) = create_instance_with_ib_config(
+        &env,
+        &managed_host,
+        one_port_ib_config(original_partition_id),
+        segment_id,
+    )
+    .await;
+    let instance_id = test_instance.id;
+    let initial_config_version = instance.config_version();
+    let metadata = instance.metadata().clone();
+    let mut requested_config = instance.config().inner().clone();
+    requested_config.infiniband = Some(one_port_ib_config(requested_partition_id));
+    let original_guid = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .config
+        .infiniband
+        .ib_interfaces
+        .into_iter()
+        .next()
+        .and_then(|interface| interface.guid)
+        .expect("allocated fixture IB interface must have a GUID");
+
+    IbTransitionFixture {
+        env,
+        managed_host,
+        instance_id,
+        initial_config_version,
+        requested_config,
+        metadata,
+        original_partition_id,
+        original_pkey,
+        original_guid,
+    }
+}
+
+fn config_update_request(
+    fixture: &IbTransitionFixture,
+    if_version_match: Option<String>,
+) -> rpc::forge::InstanceConfigUpdateRequest {
+    rpc::forge::InstanceConfigUpdateRequest {
+        instance_id: Some(fixture.instance_id),
+        if_version_match,
+        config: Some(fixture.requested_config.clone()),
+        metadata: Some(fixture.metadata.clone()),
+    }
+}
+
+fn force_delete_request(machine_id: MachineId) -> AdminForceDeleteMachineRequest {
+    AdminForceDeleteMachineRequest {
+        host_query: machine_id.to_string(),
+        delete_interfaces: false,
+        delete_bmc_interfaces: false,
+        delete_bmc_credentials: false,
+        allow_delete_with_orphaned_dpf_crds: false,
+    }
+}
+
+async fn exact_intent_count(fixture: &IbTransitionFixture) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ib_membership_cleanup_intents \
+         WHERE fabric = $1 AND pkey = $2 AND guid = $3",
+    )
+    .bind(DEFAULT_IB_FABRIC_NAME)
+    .bind(i32::from(u16::from(fixture.original_pkey)))
+    .bind(&fixture.original_guid)
+    .fetch_one(&fixture.env.pool)
+    .await
+    .unwrap()
+}
+
+async fn wait_until_lock_wait(pool: &sqlx::PgPool, query_fragments: &[&str]) {
+    for _ in 0..600 {
+        let waiting_queries: Vec<String> = sqlx::query_scalar(
+            "SELECT query FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        if waiting_queries.iter().any(|query| {
+            query_fragments
+                .iter()
+                .all(|fragment| query.contains(fragment))
+        }) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("query never blocked on the expected lock: {query_fragments:?}");
+}
+
+#[crate::sqlx_test]
+async fn release_publishes_exact_membership_atomically_and_retries_idempotently(
+    pool: sqlx::PgPool,
+) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    let release = || {
+        fixture
+            .env
+            .api
+            .release_instance(Request::new(rpc::InstanceReleaseRequest {
+                id: Some(fixture.instance_id),
+                issue: None,
+                is_repair_tenant: None,
+                delete_attribution: None,
+            }))
+    };
+
+    release().await.expect("release must succeed");
+
+    let deleted: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT deleted FROM instances WHERE id = $1")
+            .bind(fixture.instance_id)
+            .fetch_one(&fixture.env.pool)
+            .await
+            .unwrap();
+    assert!(
+        deleted.is_some(),
+        "release and its intent must commit together",
+    );
+    assert_eq!(exact_intent_count(&fixture).await, 1);
+
+    release()
+        .await
+        .expect("a release retry must remain successful");
+    assert_eq!(
+        exact_intent_count(&fixture).await,
+        1,
+        "a release retry must not duplicate its exact intent",
+    );
+}
+
+#[crate::sqlx_test]
+async fn release_without_a_partition_pkey_rolls_back(pool: sqlx::PgPool) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    sqlx::query("UPDATE ib_partitions SET status = status - 'pkey' WHERE id = $1")
+        .bind(fixture.original_partition_id)
+        .execute(&fixture.env.pool)
+        .await
+        .unwrap();
+
+    fixture
+        .env
+        .api
+        .release_instance(Request::new(rpc::InstanceReleaseRequest {
+            id: Some(fixture.instance_id),
+            issue: None,
+            is_repair_tenant: None,
+            delete_attribution: None,
+        }))
+        .await
+        .expect_err("release must fail closed without the partition's PKey");
+
+    let deleted: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT deleted FROM instances WHERE id = $1")
+            .bind(fixture.instance_id)
+            .fetch_one(&fixture.env.pool)
+            .await
+            .unwrap();
+    assert!(
+        deleted.is_none(),
+        "release and its intent must roll back together",
+    );
+    assert_eq!(exact_intent_count(&fixture).await, 0);
+}
+
+#[crate::sqlx_test]
+async fn config_update_does_not_rebase_after_waiting_for_machine(pool: sqlx::PgPool) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    let mut machine_guard = fixture.env.pool.begin().await.unwrap();
+    db::machine::find_one(
+        machine_guard.as_mut(),
+        &fixture.managed_host.id,
+        MachineSearchConfig {
+            for_update: true,
+            ..MachineSearchConfig::default()
+        },
+    )
+    .await
+    .unwrap()
+    .expect("fixture Machine must exist");
+
+    let update_api = fixture.env.api.clone();
+    let update_request = config_update_request(&fixture, None);
+    let update_task = tokio::spawn(async move {
+        update_api
+            .update_instance_config(Request::new(update_request))
+            .await
+    });
+    wait_until_lock_wait(&fixture.env.pool, &["SELECT row_to_json(m.*) FROM (SELECT"]).await;
+
+    let concurrent_version = fixture.initial_config_version.increment();
+    sqlx::query("UPDATE instances SET config_version = $1 WHERE id = $2")
+        .bind(concurrent_version)
+        .bind(fixture.instance_id)
+        .execute(&fixture.env.pool)
+        .await
+        .unwrap();
+    machine_guard.commit().await.unwrap();
+
+    update_task
+        .await
+        .unwrap()
+        .expect_err("the waiting update must retain its initial optimistic version");
+    assert_eq!(
+        exact_intent_count(&fixture).await,
+        0,
+        "the rolled-back A-to-B transition must not leave A's intent",
+    );
+    let instance = db::instance::find_by_id(&fixture.env.pool, fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(instance.config_version, concurrent_version);
+    assert_eq!(
+        instance.config.infiniband.ib_interfaces[0].ib_partition_id, fixture.original_partition_id,
+        "the rejected update must not commit the requested membership",
+    );
+}
+
+#[crate::sqlx_test]
+async fn ib_update_wins_machine_lock_before_force_delete(pool: sqlx::PgPool) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    let mut instance_guard = fixture.env.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM instances WHERE id = $1 FOR UPDATE")
+        .bind(fixture.instance_id)
+        .fetch_one(instance_guard.as_mut())
+        .await
+        .unwrap();
+
+    let update_api = fixture.env.api.clone();
+    let update_request = config_update_request(&fixture, None);
+    let update_task = tokio::spawn(async move {
+        update_api
+            .update_instance_config(Request::new(update_request))
+            .await
+    });
+    wait_until_lock_wait(
+        &fixture.env.pool,
+        &["UPDATE instances SET", "ib_config_version"],
+    )
+    .await;
+
+    let force_api = fixture.env.api.clone();
+    let force_request = force_delete_request(fixture.managed_host.id);
+    let force_task = tokio::spawn(async move {
+        force_api
+            .admin_force_delete_machine(Request::new(force_request))
+            .await
+    });
+    wait_until_lock_wait(
+        &fixture.env.pool,
+        &["UPDATE machines SET controller_state_version"],
+    )
+    .await;
+
+    instance_guard.commit().await.unwrap();
+    update_task
+        .await
+        .unwrap()
+        .expect("the update holding the Machine lock must complete first");
+    let force_response = force_task
+        .await
+        .unwrap()
+        .expect("force-delete must complete after the update")
+        .into_inner();
+    assert!(force_response.all_done);
+    assert_eq!(force_response.instance_id, fixture.instance_id.to_string());
+    assert_eq!(
+        exact_intent_count(&fixture).await,
+        1,
+        "the winning A-to-B update must retain A",
+    );
+}
+
+#[crate::sqlx_test]
+async fn force_delete_wins_machine_lock_before_ib_update(pool: sqlx::PgPool) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    let mut dpu_guard = fixture.env.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
+        .bind(fixture.managed_host.dpu_ids[0].to_string())
+        .fetch_one(dpu_guard.as_mut())
+        .await
+        .unwrap();
+    let mut instance_guard = fixture.env.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM instances WHERE id = $1 FOR UPDATE")
+        .bind(fixture.instance_id)
+        .fetch_one(instance_guard.as_mut())
+        .await
+        .unwrap();
+
+    let force_api = fixture.env.api.clone();
+    let force_request = force_delete_request(fixture.managed_host.id);
+    let force_task = tokio::spawn(async move {
+        force_api
+            .admin_force_delete_machine(Request::new(force_request))
+            .await
+    });
+    wait_until_lock_wait(
+        &fixture.env.pool,
+        &["UPDATE machines SET controller_state_version"],
+    )
+    .await;
+
+    let update_api = fixture.env.api.clone();
+    let update_request = config_update_request(&fixture, None);
+    let update_task = tokio::spawn(async move {
+        update_api
+            .update_instance_config(Request::new(update_request))
+            .await
+    });
+    wait_until_lock_wait(&fixture.env.pool, &["SELECT row_to_json(m.*) FROM (SELECT"]).await;
+
+    dpu_guard.commit().await.unwrap();
+    let update_result = tokio::time::timeout(std::time::Duration::from_secs(30), update_task)
+        .await
+        .expect("the update must reread ForceDeletion without waiting for Instance")
+        .unwrap();
+    assert!(
+        update_result.is_err(),
+        "force-delete must reject the waiting update"
+    );
+    assert_eq!(
+        exact_intent_count(&fixture).await,
+        0,
+        "the rejected A-to-B update must not publish A",
+    );
+
+    instance_guard.commit().await.unwrap();
+    let force_response = force_task
+        .await
+        .unwrap()
+        .expect("force-delete must finish after its test guard is released")
+        .into_inner();
+    assert!(force_response.all_done);
 }
 
 #[crate::sqlx_test]

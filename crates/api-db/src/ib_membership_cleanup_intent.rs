@@ -38,11 +38,10 @@ pub struct IbMembershipCleanupIntent {
 const LIST_BATCH_SIZE: i64 = 100;
 
 /// Ensures that an exact desired-absence membership is durable.
-// Persistence intentionally landed one PR before its force-delete publisher.
-// Remove this exception when https://github.com/NVIDIA/infra-controller/issues/5139
-// calls the helper.
-#[allow(dead_code)]
-async fn create(txn: &mut PgConnection, intent: &IbMembershipCleanupIntent) -> DatabaseResult<()> {
+pub async fn create(
+    txn: &mut PgConnection,
+    intent: &IbMembershipCleanupIntent,
+) -> DatabaseResult<()> {
     const QUERY: &str = "INSERT INTO ib_membership_cleanup_intents (fabric, pkey, guid)
         VALUES ($1, $2, $3)
         ON CONFLICT (fabric, pkey, guid) DO NOTHING";

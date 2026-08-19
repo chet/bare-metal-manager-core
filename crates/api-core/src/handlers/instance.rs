@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use ::rpc::errors::RpcDataConversionError;
@@ -37,6 +37,8 @@ use health_report::{
 use itertools::Itertools as _;
 use model::ConfigValidationError;
 use model::dpa_interface::DpaSearchConfig;
+use model::ib::DEFAULT_IB_FABRIC_NAME;
+use model::ib_partition::PartitionKey;
 use model::instance::config::InstanceConfig;
 use model::instance::config::extension_services::InstanceExtensionServicesConfig;
 use model::instance::config::infiniband::InstanceInfinibandConfig;
@@ -723,8 +725,45 @@ pub(crate) async fn release(
 
     let mut txn = api.txn_begin().await?;
 
-    let instance = db::instance::find_by_id(&mut txn, instance_id)
+    let initial_instance = db::instance::find_by_id(&mut txn, instance_id)
         .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "instance",
+            id: instance_id.to_string(),
+        })?;
+    let machine_id = initial_instance.machine_id;
+    drop(initial_instance);
+
+    // Allocation, configuration updates, normal release, and force-delete all
+    // serialize membership changes through the host Machine row. The initial
+    // Instance read above is deliberately unlocked and is used only to find
+    // that row; authoritative state is loaded after this lock is acquired.
+    let machine = db::machine::find_one(
+        &mut txn,
+        &machine_id,
+        MachineSearchConfig {
+            for_update: true,
+            ..MachineSearchConfig::default()
+        },
+    )
+    .await?
+    .ok_or_else(|| CarbideError::NotFoundError {
+        kind: "machine",
+        id: machine_id.to_string(),
+    })?;
+    let mh_snapshot = db::managed_host::load_snapshot(
+        &mut txn,
+        &machine_id,
+        LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
+    )
+    .await?
+    .ok_or_else(|| CarbideError::NotFoundError {
+        kind: "machine",
+        id: machine_id.to_string(),
+    })?;
+    let instance = mh_snapshot
+        .instance
+        .filter(|instance| instance.id == instance_id)
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
@@ -753,21 +792,6 @@ pub(crate) async fn release(
             has_issues = delete_instance.issue.is_some(),
             "Instance release requested by repair tenant"
         );
-
-        // Get machine details for repair tenant workflow
-        let machine = db::machine::find_one(
-            &mut txn,
-            &instance.machine_id,
-            MachineSearchConfig {
-                for_update: false,
-                ..Default::default()
-            },
-        )
-        .await?
-        .ok_or_else(|| CarbideError::NotFoundError {
-            kind: "machine",
-            id: instance.machine_id.to_string(),
-        })?;
 
         // Handle repair tenant workflow
         handle_instance_release_from_repair_tenant(
@@ -798,6 +822,11 @@ pub(crate) async fn release(
         })?;
     }
 
+    let ib_memberships = resolve_ib_memberships(txn.as_mut(), &instance.config.infiniband).await?;
+    for membership in &ib_memberships {
+        db::ib_membership_cleanup_intent::create(txn.as_mut(), membership).await?;
+    }
+
     if instance.deleted.is_some() {
         tracing::info!(
             %instance_id,
@@ -807,9 +836,6 @@ pub(crate) async fn release(
         return Ok(Response::new(rpc::InstanceReleaseResult {}));
     }
 
-    // TODO: This is racy. If the instance just got deleted we still
-    // see an error here that is not returned as `NotFound` error. Ideally
-    // we convert this case of the DatabaseError into NotFound too.
     db::instance::mark_as_deleted(instance_id, &mut txn).await?;
 
     txn.commit().await?;
@@ -1189,6 +1215,12 @@ pub(crate) async fn update_instance_config(
     let instance_id = request
         .instance_id
         .ok_or(CarbideError::MissingArgument("id"))?;
+    let requested_version = request
+        .if_version_match
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(CarbideError::from)?;
 
     // RPC conversion intentionally ignores the deprecated boolean. Remember the exact legacy
     // wire form so the stored auto config can be restored after the instance lookup.
@@ -1237,8 +1269,48 @@ pub(crate) async fn update_instance_config(
 
     let mut txn = api.txn_begin().await?;
 
-    let instance = db::instance::find_by_id(&mut txn, instance_id)
+    let initial_instance = db::instance::find_by_id(&mut txn, instance_id)
         .await?
+        .ok_or(CarbideError::NotFoundError {
+            kind: "instance",
+            id: instance_id.to_string(),
+        })?;
+    let machine_id = initial_instance.machine_id;
+    // A request without an explicit token captures the version before it can
+    // wait for the Machine lock. The post-lock reread is authoritative for
+    // state and config, but must not silently rebase this optimistic update.
+    let expected_version = requested_version.unwrap_or(initial_instance.config_version);
+    drop(initial_instance);
+
+    db::machine::find_one(
+        &mut txn,
+        &machine_id,
+        MachineSearchConfig {
+            for_update: true,
+            ..MachineSearchConfig::default()
+        },
+    )
+    .await?
+    .ok_or(CarbideError::NotFoundError {
+        kind: "machine",
+        id: machine_id.to_string(),
+    })?;
+
+    let mh_snapshot = db::managed_host::load_snapshot(
+        &mut txn,
+        &machine_id,
+        LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
+    )
+    .await?
+    .ok_or(CarbideError::NotFoundError {
+        kind: "instance",
+        id: instance_id.to_string(),
+    })?;
+    let instance = mh_snapshot
+        .instance
+        .as_ref()
+        .filter(|instance| instance.id == instance_id)
+        .cloned()
         .ok_or(CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
@@ -1255,17 +1327,6 @@ pub(crate) async fn update_instance_config(
 
     log_machine_id(&instance.machine_id);
     log_tenant_organization_id(instance.config.tenant.tenant_organization_id.as_str());
-
-    let mh_snapshot = db::managed_host::load_snapshot(
-        &mut txn,
-        &instance.machine_id,
-        LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
-    )
-    .await?
-    .ok_or(CarbideError::NotFoundError {
-        kind: "instance",
-        id: instance_id.to_string(),
-    })?;
 
     if mh_snapshot
         .instance
@@ -1297,11 +1358,6 @@ pub(crate) async fn update_instance_config(
         .map_err(CarbideError::from)?;
 
     validate_os_definition_usable(&mut txn, &config.os).await?;
-
-    let expected_version = match request.if_version_match {
-        Some(version) => version.parse().map_err(CarbideError::from)?,
-        None => instance.config_version,
-    };
 
     // If an NSG is applied, we need to do a little more validation.
     if let InstanceConfig {
@@ -1655,6 +1711,13 @@ async fn update_instance_infiniband_config(
 
     *ib_config = ib_config_with_ports;
 
+    let current_memberships =
+        resolve_ib_memberships(txn.as_mut(), &instance.config.infiniband).await?;
+    let requested_memberships = resolve_ib_memberships(txn.as_mut(), ib_config).await?;
+    for retired_membership in current_memberships.difference(&requested_memberships) {
+        db::ib_membership_cleanup_intent::create(txn.as_mut(), retired_membership).await?;
+    }
+
     // Persist the GUID for Infiniband configuration.
     // We need to increment the version number.
     db::instance::update_ib_config(
@@ -1667,6 +1730,69 @@ async fn update_instance_infiniband_config(
     .await?;
 
     Ok(())
+}
+
+async fn resolve_ib_memberships(
+    txn: &mut PgConnection,
+    config: &InstanceInfinibandConfig,
+) -> Result<HashSet<db::ib_membership_cleanup_intent::IbMembershipCleanupIntent>, CarbideError> {
+    let partition_ids = config
+        .ib_interfaces
+        .iter()
+        .map(|interface| interface.ib_partition_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let partitions = db::ib_partition::find_by(
+        txn,
+        ObjectColumnFilter::List(db::ib_partition::IdColumn, &partition_ids),
+    )
+    .await?;
+    let pkeys = partitions
+        .into_iter()
+        .filter_map(|partition| {
+            partition
+                .status
+                .and_then(|status| status.pkey)
+                .map(|pkey| (partition.id, pkey))
+        })
+        .collect();
+
+    memberships_from_config(config, &pkeys)
+}
+
+fn memberships_from_config(
+    config: &InstanceInfinibandConfig,
+    pkeys: &HashMap<IBPartitionId, PartitionKey>,
+) -> Result<HashSet<db::ib_membership_cleanup_intent::IbMembershipCleanupIntent>, CarbideError> {
+    config
+        .ib_interfaces
+        .iter()
+        .map(|interface| {
+            let pkey = pkeys
+                .get(&interface.ib_partition_id)
+                .copied()
+                .ok_or_else(|| {
+                    CarbideError::internal(format!(
+                        "InfiniBand partition {} has no valid PKey",
+                        interface.ib_partition_id
+                    ))
+                })?;
+            let guid = interface.guid.clone().ok_or_else(|| {
+                CarbideError::internal(format!(
+                    "InfiniBand interface for partition {} has no allocated GUID",
+                    interface.ib_partition_id
+                ))
+            })?;
+            Ok(
+                db::ib_membership_cleanup_intent::IbMembershipCleanupIntent {
+                    fabric: DEFAULT_IB_FABRIC_NAME.to_string(),
+                    pkey,
+                    guid,
+                },
+            )
+        })
+        .collect()
 }
 
 async fn update_instance_extension_services_config(
@@ -2088,5 +2214,94 @@ impl HydrateFromDeprecatedFields for rpc::BatchInstanceAllocationRequest {
             req.hydrate_from_deprecated_fields(txn).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::{Case, check_cases};
+    use model::instance::config::infiniband::InstanceIbInterfaceConfig;
+    use model::instance::config::network::InterfaceFunctionId;
+
+    use super::*;
+
+    fn ib_interface(partition_id: IBPartitionId, guid: Option<&str>) -> InstanceIbInterfaceConfig {
+        InstanceIbInterfaceConfig {
+            function_id: InterfaceFunctionId::Physical {},
+            ib_partition_id: partition_id,
+            pf_guid: guid.map(str::to_string),
+            guid: guid.map(str::to_string),
+            device: "test-device".to_string(),
+            vendor: None,
+            device_instance: 0,
+        }
+    }
+
+    #[test]
+    fn ib_memberships_require_exact_partition_and_guid_data() {
+        let partition_a = IBPartitionId::new();
+        let partition_b = IBPartitionId::new();
+        let pkey_a = PartitionKey::try_from(0x101).unwrap();
+        let pkey_b = PartitionKey::try_from(0x102).unwrap();
+        let exact = db::ib_membership_cleanup_intent::IbMembershipCleanupIntent {
+            fabric: DEFAULT_IB_FABRIC_NAME.to_string(),
+            pkey: pkey_a,
+            guid: "guid-a".to_string(),
+        };
+
+        check_cases(
+            [
+                Case {
+                    scenario: "empty config",
+                    input: (InstanceInfinibandConfig::default(), HashMap::new()),
+                    expect: Yields(HashSet::new()),
+                },
+                Case {
+                    scenario: "one exact membership",
+                    input: (
+                        InstanceInfinibandConfig {
+                            ib_interfaces: vec![ib_interface(partition_a, Some("guid-a"))],
+                        },
+                        HashMap::from([(partition_a, pkey_a)]),
+                    ),
+                    expect: Yields(HashSet::from([exact.clone()])),
+                },
+                Case {
+                    scenario: "duplicate exact membership",
+                    input: (
+                        InstanceInfinibandConfig {
+                            ib_interfaces: vec![
+                                ib_interface(partition_a, Some("guid-a")),
+                                ib_interface(partition_a, Some("guid-a")),
+                            ],
+                        },
+                        HashMap::from([(partition_a, pkey_a)]),
+                    ),
+                    expect: Yields(HashSet::from([exact])),
+                },
+                Case {
+                    scenario: "referenced partition has no PKey",
+                    input: (
+                        InstanceInfinibandConfig {
+                            ib_interfaces: vec![ib_interface(partition_b, Some("guid-b"))],
+                        },
+                        HashMap::from([(partition_a, pkey_a)]),
+                    ),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "interface has no allocated GUID",
+                    input: (
+                        InstanceInfinibandConfig {
+                            ib_interfaces: vec![ib_interface(partition_b, None)],
+                        },
+                        HashMap::from([(partition_b, pkey_b)]),
+                    ),
+                    expect: Fails,
+                },
+            ],
+            |(config, pkeys)| memberships_from_config(&config, &pkeys).map_err(drop),
+        );
     }
 }
