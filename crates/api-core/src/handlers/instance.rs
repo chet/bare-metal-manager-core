@@ -1871,6 +1871,25 @@ fn snapshot_to_instance(
         })
 }
 
+/// Publishes the exact IB memberships that must remain absent after an admin
+/// force-delete removes the owning Instance and Machine.
+pub(super) async fn publish_force_delete_ib_cleanup_intents(
+    txn: &mut PgConnection,
+    instance_id: InstanceId,
+) -> CarbideResult<()> {
+    let instance = db::instance::find_by_id(&mut *txn, instance_id)
+        .await?
+        .ok_or_else(|| {
+            CarbideError::internal(format!("could not find an instance for {instance_id}"))
+        })?;
+    let memberships = resolve_ib_memberships(txn, &instance.config.infiniband).await?;
+    for membership in &memberships {
+        db::ib_membership_cleanup_intent::create(txn, membership).await?;
+    }
+
+    Ok(())
+}
+
 pub(super) async fn force_delete_instance(
     instance_id: InstanceId,
     api: &Api,

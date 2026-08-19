@@ -17,8 +17,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use carbide_ib_fabric::IbFabricMonitor;
 use carbide_ib_fabric::config::IBFabricConfig;
-use carbide_ib_fabric::ib::{Filter, IBFabric, IBFabricManager};
+use carbide_ib_fabric::ib::{Filter, GetPartitionOptions, IBFabric, IBFabricManager};
 use carbide_instrument::testing::MetricsCapture;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
@@ -83,6 +84,7 @@ struct IbTransitionFixture {
     original_partition_id: IBPartitionId,
     original_pkey: PartitionKey,
     original_guid: String,
+    requested_pkey: PartitionKey,
 }
 
 fn one_port_ib_config(partition_id: IBPartitionId) -> rpc::InstanceInfinibandConfig {
@@ -117,13 +119,20 @@ async fn create_ib_transition_fixture(pool: sqlx::PgPool) -> IbTransitionFixture
         DEFAULT_TENANT.to_string(),
     )
     .await;
-    let (requested_partition_id, _) = create_ib_partition(
+    let (requested_partition_id, requested_partition) = create_ib_partition(
         &env,
         "transition-requested".to_string(),
         DEFAULT_TENANT.to_string(),
     )
     .await;
     let original_pkey = original_partition
+        .status
+        .as_ref()
+        .and_then(|status| status.pkey.as_deref())
+        .expect("ready fixture partition must have a PKey")
+        .parse()
+        .expect("fixture PKey must be valid");
+    let requested_pkey = requested_partition
         .status
         .as_ref()
         .and_then(|status| status.pkey.as_deref())
@@ -166,6 +175,7 @@ async fn create_ib_transition_fixture(pool: sqlx::PgPool) -> IbTransitionFixture
         original_partition_id,
         original_pkey,
         original_guid,
+        requested_pkey,
     }
 }
 
@@ -202,6 +212,38 @@ async fn exact_intent_count(fixture: &IbTransitionFixture) -> i64 {
     .fetch_one(&fixture.env.pool)
     .await
     .unwrap()
+}
+
+fn cleanup_intent(
+    pkey: PartitionKey,
+    guid: &str,
+) -> db::ib_membership_cleanup_intent::IbMembershipCleanupIntent {
+    db::ib_membership_cleanup_intent::IbMembershipCleanupIntent {
+        fabric: DEFAULT_IB_FABRIC_NAME.to_string(),
+        pkey,
+        guid: guid.to_string(),
+    }
+}
+
+async fn cleanup_intents(
+    env: &TestEnv,
+) -> HashSet<db::ib_membership_cleanup_intent::IbMembershipCleanupIntent> {
+    db::ib_membership_cleanup_intent::list_batch(&env.pool, None, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect()
+}
+
+fn restarted_ib_monitor(env: &TestEnv) -> IbFabricMonitor {
+    IbFabricMonitor::new(
+        env.pool.clone(),
+        env.config.ib_fabrics.clone(),
+        env.test_meter.meter(),
+        env.ib_fabric_manager.clone(),
+        env.config.host_health,
+        env.api.work_lock_manager_handle.clone(),
+    )
 }
 
 async fn wait_until_lock_wait(pool: &sqlx::PgPool, query_fragments: &[&str]) {
@@ -458,8 +500,8 @@ async fn force_delete_wins_machine_lock_before_ib_update(pool: sqlx::PgPool) {
     );
     assert_eq!(
         exact_intent_count(&fixture).await,
-        0,
-        "the rejected A-to-B update must not publish A",
+        1,
+        "force-delete must publish current A while the rejected update adds nothing",
     );
 
     instance_guard.commit().await.unwrap();
@@ -469,6 +511,147 @@ async fn force_delete_wins_machine_lock_before_ib_update(pool: sqlx::PgPool) {
         .expect("force-delete must finish after its test guard is released")
         .into_inner();
     assert!(force_response.all_done);
+}
+
+#[crate::sqlx_test]
+async fn force_delete_intents_repair_delayed_binds_after_config_change(pool: sqlx::PgPool) {
+    let fixture = create_ib_transition_fixture(pool).await;
+    let fabric = fixture
+        .env
+        .ib_fabric_manager
+        .new_client(DEFAULT_IB_FABRIC_NAME)
+        .await
+        .unwrap();
+    let partition_options = GetPartitionOptions {
+        include_guids_data: false,
+        include_qos_conf: true,
+    };
+    let original_network = fabric
+        .get_ib_network(u16::from(fixture.original_pkey), partition_options)
+        .await
+        .unwrap();
+    let requested_network = model::ib::IBNetwork {
+        name: "transition-requested".to_string(),
+        pkey: u16::from(fixture.requested_pkey),
+        associated_guids: None,
+        ..original_network.clone()
+    };
+
+    fixture
+        .env
+        .api
+        .update_instance_config(Request::new(config_update_request(&fixture, None)))
+        .await
+        .expect("the A-to-B configuration update must succeed");
+    let updated_instance = db::instance::find_by_id(&fixture.env.pool, fixture.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let requested_interface = &updated_instance.config.infiniband.ib_interfaces[0];
+    let requested_guid = requested_interface
+        .guid
+        .as_deref()
+        .expect("the updated interface must retain its allocated GUID");
+    let retired_intent = cleanup_intent(fixture.original_pkey, &fixture.original_guid);
+    let current_intent = cleanup_intent(fixture.requested_pkey, requested_guid);
+    assert_eq!(
+        cleanup_intents(&fixture.env).await,
+        HashSet::from([retired_intent.clone()]),
+        "the A-to-B update must retain the retired A tuple",
+    );
+
+    // Model reconciliation of the live configuration before force-delete.
+    fabric
+        .unbind_ib_ports(
+            u16::from(retired_intent.pkey),
+            vec![retired_intent.guid.clone()],
+        )
+        .await
+        .unwrap();
+    fabric
+        .bind_ib_ports(requested_network.clone(), vec![current_intent.guid.clone()])
+        .await
+        .unwrap();
+
+    let expected_intents = HashSet::from([retired_intent.clone(), current_intent.clone()]);
+    let mock_fabric = fixture.env.ib_fabric_manager.get_mock_manager();
+    mock_fabric.set_unbind_failure(true);
+    for attempt in 1..=2 {
+        let error = fixture
+            .env
+            .api
+            .admin_force_delete_machine(Request::new(force_delete_request(fixture.managed_host.id)))
+            .await
+            .expect_err("the simulated UFM failure must stop force-delete");
+        assert!(
+            error.message().contains("simulated UFM unbind failure"),
+            "attempt {attempt} returned an unexpected error: {error}",
+        );
+        assert_eq!(
+            cleanup_intents(&fixture.env).await,
+            expected_intents,
+            "attempt {attempt} must retain one intent for each exact tuple",
+        );
+        assert!(
+            db::instance::find_by_id(&fixture.env.pool, fixture.instance_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "attempt {attempt} must retain the Instance after UFM fails",
+        );
+    }
+
+    mock_fabric.set_unbind_failure(false);
+    let response = fixture
+        .env
+        .api
+        .admin_force_delete_machine(Request::new(force_delete_request(fixture.managed_host.id)))
+        .await
+        .expect("force-delete must retry successfully")
+        .into_inner();
+    assert!(response.all_done);
+    assert!(
+        db::instance::find_by_id(&fixture.env.pool, fixture.instance_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the successful retry must delete the Instance",
+    );
+    assert_eq!(cleanup_intents(&fixture.env).await, expected_intents);
+    verify_pkey_guids(
+        fabric.clone(),
+        &[
+            (u16::from(retired_intent.pkey), vec![]),
+            (u16::from(current_intent.pkey), vec![]),
+        ],
+    )
+    .await;
+
+    // Simulate stale bind operations that finish only after deletion. A newly
+    // constructed monitor must remove both while retaining their standing
+    // desired-absence evidence.
+    fabric
+        .bind_ib_ports(original_network, vec![retired_intent.guid.clone()])
+        .await
+        .unwrap();
+    fabric
+        .bind_ib_ports(requested_network, vec![current_intent.guid.clone()])
+        .await
+        .unwrap();
+    restarted_ib_monitor(&fixture.env)
+        .run_single_iteration()
+        .await
+        .unwrap();
+
+    verify_pkey_guids(
+        fabric,
+        &[
+            (u16::from(retired_intent.pkey), vec![]),
+            (u16::from(current_intent.pkey), vec![]),
+        ],
+    )
+    .await;
+    assert_eq!(cleanup_intents(&fixture.env).await, expected_intents);
 }
 
 #[crate::sqlx_test]

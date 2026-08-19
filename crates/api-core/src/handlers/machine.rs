@@ -665,6 +665,13 @@ pub(crate) async fn admin_force_delete_machine(
         let instance_id = db::instance::find_id_by_machine_id(&mut txn, &host_machine.id).await?;
         if let Some(instance_id) = &instance_id {
             response.instance_id = instance_id.to_string();
+            // Persist desired absence in the same transaction as the
+            // ForceDeletion boundary. UFM cleanup runs after this commits.
+            crate::handlers::instance::publish_force_delete_ib_cleanup_intents(
+                &mut txn,
+                *instance_id,
+            )
+            .await?;
         }
         instance_id
     } else {
