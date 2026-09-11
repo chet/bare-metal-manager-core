@@ -572,6 +572,27 @@ pub async fn find_one(
     }
 }
 
+/// Lock an interface for address selection and return its current segment.
+///
+/// Call inside a transaction, then read the current addresses before deciding
+/// whether to insert or replace one. The parent row also serializes writers
+/// when the requested address family has no row yet. Callers that allocate
+/// from a pool must take the segment advisory lock before this row lock.
+pub async fn lock_for_address_assignment(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+) -> DatabaseResult<NetworkSegmentId> {
+    let query = "SELECT segment_id FROM machine_interfaces WHERE id = $1 FOR UPDATE";
+    sqlx::query_scalar(query)
+        .bind(interface_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .ok_or(DatabaseError::FindOneReturnedNoResultsError(
+            interface_id.into(),
+        ))
+}
+
 /// Optional metadata used while finding or creating a DHCP machine interface.
 ///
 /// DHCPv4 and DHCPv6 for the same NIC intentionally converge on one
@@ -612,12 +633,15 @@ pub async fn find_or_create_machine_interface(
             retained_window,
         },
         None,
+        None,
     )
     .await
 }
 
 /// Find or create a DHCP interface, allocating only the requested family for a
-/// brand-new dynamic row.
+/// brand-new dynamic row. Callers must lock `locked_segment_ids` before any
+/// interface writes; a newly selected allocation segment outside that set
+/// returns `FailedPrecondition` rather than acquiring another lock out of order.
 pub async fn find_or_create_machine_interface_for_family(
     txn: &mut PgConnection,
     machine_id: Option<MachineId>,
@@ -625,6 +649,7 @@ pub async fn find_or_create_machine_interface_for_family(
     relays: &[IpAddr],
     options: FindOrCreateMachineInterfaceOptions,
     address_family: IpAddressFamily,
+    locked_segment_ids: &[NetworkSegmentId],
 ) -> DatabaseResult<MachineInterfaceSnapshot> {
     find_or_create_machine_interface_inner(
         txn,
@@ -633,6 +658,7 @@ pub async fn find_or_create_machine_interface_for_family(
         relays,
         options,
         Some(address_family),
+        Some(locked_segment_ids),
     )
     .await
 }
@@ -644,6 +670,7 @@ async fn find_or_create_machine_interface_inner(
     relays: &[IpAddr],
     options: FindOrCreateMachineInterfaceOptions,
     address_family: Option<IpAddressFamily>,
+    locked_segment_ids: Option<&[NetworkSegmentId]>,
 ) -> DatabaseResult<MachineInterfaceSnapshot> {
     let FindOrCreateMachineInterfaceOptions {
         expected_interface,
@@ -669,6 +696,7 @@ async fn find_or_create_machine_interface_inner(
                 expected_interface,
                 retained_window,
                 address_family,
+                locked_segment_ids,
             )
             .await?;
             apply_primary_declaration(&mut *txn, &mut interface, is_primary).await?;
@@ -1055,6 +1083,7 @@ pub async fn validate_existing_mac_and_create(
         expected_interface,
         retained_window,
         None,
+        None,
     )
     .await
 }
@@ -1069,6 +1098,7 @@ async fn validate_existing_mac_and_create_inner(
     expected_interface: Option<ExpectedInterface>,
     retained_window: Option<chrono::Duration>,
     address_family: Option<IpAddressFamily>,
+    locked_segment_ids: Option<&[NetworkSegmentId]>,
 ) -> DatabaseResult<MachineInterfaceSnapshot> {
     let expected_interface_type = expected_interface
         .as_ref()
@@ -1155,6 +1185,17 @@ async fn validate_existing_mac_and_create_inner(
                 // preallocate_machine_interface, preallocate_bmc_machine_interface, or
                 // preallocate_expected_machine_interface.
                 // (`create` recovers any retained boot interface id onto the new row.)
+                if let Some(locked_segment_ids) = locked_segment_ids
+                    && let Some(segment) = network_segments
+                        .iter()
+                        .find(|segment| !locked_segment_ids.contains(&segment.id))
+                {
+                    return Err(DatabaseError::FailedPrecondition(format!(
+                        "network segment {} was not locked before DHCP interface reconciliation",
+                        segment.id,
+                    )));
+                }
+
                 let v = create_with_type(
                     txn,
                     &network_segments,
@@ -1345,6 +1386,19 @@ async fn retain_address_by_mac_and_type(
     interface_type: InterfaceType,
     segment_type_guard: Option<NetworkSegmentType>,
 ) -> DatabaseResult<()> {
+    // Retention changes the allocation type used by assignment's delete
+    // predicate. Serialize that change with address replacement too, and limit
+    // later queries to these IDs so newly visible interfaces cannot enter unlocked.
+    let query = "SELECT id FROM machine_interfaces
+        WHERE mac_address = $1 AND interface_type = $2
+        ORDER BY id FOR UPDATE";
+    let interface_ids: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
+        .bind(mac_address)
+        .bind(interface_type)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
     if let Some(segment_type_guard) = segment_type_guard {
         let query = "SELECT ns.network_segment_type
             FROM machine_interfaces mi
@@ -1354,11 +1408,13 @@ async fn retain_address_by_mac_and_type(
               AND mi.interface_type = $2
               AND mia.allocation_type = 'dhcp'
               AND ns.network_segment_type != $3
+              AND mi.id = ANY($4)
             LIMIT 1";
         let mismatched_segment_type: Option<NetworkSegmentType> = sqlx::query_scalar(query)
             .bind(mac_address)
             .bind(interface_type)
             .bind(segment_type_guard)
+            .bind(&interface_ids)
             .fetch_optional(&mut *txn)
             .await
             .map_err(|err| DatabaseError::query(query, err))?;
@@ -1378,11 +1434,13 @@ async fn retain_address_by_mac_and_type(
                   WHERE mi.mac_address = $1
                     AND mi.interface_type = $2
                     AND ns.network_segment_type = $3
+                    AND mi.id = ANY($4)
               )";
         return sqlx::query(query)
             .bind(mac_address)
             .bind(interface_type)
             .bind(segment_type_guard)
+            .bind(&interface_ids)
             .execute(txn)
             .await
             .map(|_| ())
@@ -1395,10 +1453,12 @@ async fn retain_address_by_mac_and_type(
           AND interface_id IN (
               SELECT id FROM machine_interfaces
               WHERE mac_address = $1 AND interface_type = $2
+                AND id = ANY($3)
           )";
     sqlx::query(query)
         .bind(mac_address)
         .bind(interface_type)
+        .bind(&interface_ids)
         .execute(txn)
         .await
         .map(|_| ())
@@ -1453,6 +1513,8 @@ async fn reconcile_existing_preallocation(
     let Some(iface) = existing.first() else {
         return Ok(false);
     };
+    lock_for_address_assignment(&mut *txn, iface.id).await?;
+    let iface = find_one(&mut *txn, iface.id).await?;
 
     let family = static_ip.address_family();
     let addresses =
@@ -2289,12 +2351,7 @@ async fn lock_network_segment_shared(
     txn: &mut PgTransaction<'_>,
     segment: &NetworkSegment,
 ) -> DatabaseResult<()> {
-    let query = "SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))";
-    sqlx::query_scalar(query)
-        .bind(format!("network_segment.{}", segment.id))
-        .fetch_one(txn.as_mut())
-        .await
-        .map_err(|e| DatabaseError::query(query, e))
+    lock_network_segments_shared(txn.as_mut(), std::slice::from_ref(&segment.id)).await
 }
 
 async fn lock_network_segment_exclusive(
@@ -2307,9 +2364,8 @@ async fn lock_network_segment_exclusive(
 
 /// Advisory-lock every segment in `segment_ids`, in ascending id order --
 /// the allocator convention: segment advisory lock first, then machine
-/// interface/address row locks. This is the one home for the lock key and
-/// ordering; every segment-lock helper funnels through it. Must run inside a
-/// transaction: the locks are `pg_advisory_xact_lock`-scoped and release on
+/// interface/address row locks. Must run inside a transaction: the locks are
+/// `pg_advisory_xact_lock`-scoped and release on
 /// commit or rollback.
 pub async fn lock_network_segments_exclusive(
     txn: &mut PgConnection,
@@ -2320,6 +2376,28 @@ pub async fn lock_network_segments_exclusive(
     ids.dedup();
     for id in ids {
         let query = "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))";
+        sqlx::query_scalar::<_, ()>(query)
+            .bind(format!("network_segment.{id}"))
+            .fetch_one(&mut *txn)
+            .await
+            .map_err(|e| DatabaseError::query(query, e))?;
+    }
+    Ok(())
+}
+
+/// Acquire shared segment locks in ascending ID order within a transaction.
+/// IPv4 DHCP takes these before interface updates, matching its allocator's
+/// shared locks. Callers that can allocate IPv6 or a whole prefix must use
+/// exclusive locks from the start rather than upgrade shared locks later.
+pub async fn lock_network_segments_shared(
+    txn: &mut PgConnection,
+    segment_ids: &[NetworkSegmentId],
+) -> DatabaseResult<()> {
+    let mut ids = segment_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    for id in ids {
+        let query = "SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 0))";
         sqlx::query_scalar::<_, ()>(query)
             .bind(format!("network_segment.{id}"))
             .fetch_one(&mut *txn)
@@ -2415,7 +2493,7 @@ pub async fn find_optional_for_update_by_ip(
         FROM machine_interface_addresses mia
         JOIN machine_interfaces mi ON mi.id = mia.interface_id
         WHERE mia.address = $1::inet
-        FOR UPDATE OF mia, mi
+        FOR UPDATE OF mi
     "#;
     let interface_ids: Vec<(MachineInterfaceId,)> = sqlx::query_as(query)
         .bind(remote_ip)
@@ -2425,7 +2503,23 @@ pub async fn find_optional_for_update_by_ip(
 
     match interface_ids.as_slice() {
         [] => Ok(None),
-        [(interface_id,)] => find_one(txn, *interface_id).await.map(Some),
+        [(interface_id,)] => {
+            // Assignment locks the interface before its address rows. The address
+            // may have been replaced while we waited, so recheck this exact owner
+            // before accepting it as the discovery source.
+            let query = "SELECT interface_id FROM machine_interface_addresses
+                WHERE interface_id = $1 AND address = $2::inet FOR UPDATE";
+            let owner = sqlx::query_scalar::<_, MachineInterfaceId>(query)
+                .bind(interface_id)
+                .bind(remote_ip)
+                .fetch_optional(&mut *txn)
+                .await
+                .map_err(|e| DatabaseError::query(query, e))?;
+            if owner.is_none() {
+                return Ok(None);
+            }
+            find_one(txn, *interface_id).await.map(Some)
+        }
         // The address uniqueness constraint makes this unreachable on a valid schema. Keep the
         // guard so discovery fails closed if database invariants are bypassed.
         _ => Err(DatabaseError::internal(format!(
@@ -2579,11 +2673,16 @@ pub async fn get_machine_interface_primary(
 
 /// Move an entry from predicted_machine_interfaces to machine_interfaces, using the given relay IP
 /// to know what network segment to assign.
+///
+/// The caller must acquire `locked_segment_ids` exclusively, including every
+/// admin segment, before updating interface rows. Reject a relay segment that
+/// appeared after that lookup so later DHCP allocation cannot lock it out of order.
 pub async fn move_predicted_machine_interface_to_machine(
     txn: &mut PgConnection,
     predicted_machine_interface: &PredictedMachineInterface,
     relay_ip: IpAddr,
     retained_window: Option<chrono::Duration>,
+    locked_segment_ids: &[NetworkSegmentId],
 ) -> Result<(), DatabaseError> {
     tracing::info!(
         machine_id=%predicted_machine_interface.machine_id,
@@ -2605,6 +2704,13 @@ pub async fn move_predicted_machine_interface_to_machine(
             predicted_machine_interface.mac_address,
             network_segment.id,
             predicted_machine_interface.expected_network_segment_type,
+        )));
+    }
+
+    if !locked_segment_ids.contains(&network_segment.id) {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "network segment {} changed before predicted interface promotion",
+            network_segment.id,
         )));
     }
 

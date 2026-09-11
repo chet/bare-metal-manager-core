@@ -132,6 +132,130 @@ async fn create_managed_segment(
 }
 
 #[crate::sqlx_test]
+async fn discovery_lookup_rechecks_address_after_assignment(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_managed_segment(
+        &pool,
+        "discovery-static-race",
+        "192.0.2.0/24",
+        NetworkSegmentType::Underlay,
+        AllocationStrategy::Dynamic,
+    )
+    .await?;
+    let mac: MacAddress = "02:00:00:00:53:9a".parse()?;
+    let original_address: IpAddr = "192.0.2.98".parse()?;
+    let replacement_address: IpAddr = "192.0.2.99".parse()?;
+    let mut setup = pool.begin().await?;
+    preallocate_machine_interface(&mut setup, mac, original_address, None).await?;
+    let interface_id = find_by_mac_address(&mut *setup, mac).await?[0].id;
+    setup.commit().await?;
+
+    let mut holder = pool.begin().await?;
+    lock_for_address_assignment(&mut holder, interface_id).await?;
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await?;
+    let mut waiter = pool.begin().await?;
+    let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *waiter)
+        .await?;
+
+    let lookup = async {
+        let result = find_optional_for_update_by_ip(&mut waiter, original_address).await?;
+        waiter.commit().await?;
+        Ok::<_, Box<dyn std::error::Error>>(result)
+    };
+    let replace = async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                .bind(holder_pid)
+                .bind(waiter_pid)
+                .fetch_one(&pool)
+                .await?;
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let result = db::machine_interface_address::assign_static(
+            &mut holder,
+            interface_id,
+            replacement_address,
+        )
+        .await?;
+        holder.commit().await?;
+        Ok::<_, Box<dyn std::error::Error>>(result)
+    };
+    let (lookup, replacement) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(lookup, replace)
+    })
+    .await?;
+    assert_eq!(
+        replacement?,
+        model::allocation_type::AssignStaticResult::ReplacedStatic
+    );
+    assert!(
+        lookup?.is_none(),
+        "discovery must not accept an address replaced while it waited"
+    );
+
+    let mut connection = pool.acquire().await?;
+    let addresses =
+        db::machine_interface_address::find_for_interface(&mut connection, interface_id).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].address, replacement_address);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Static);
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn dhcp_creation_rejects_a_segment_selected_after_locking(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let segment_id = create_managed_segment(
+        &pool,
+        "new-dhcp-candidate",
+        "2001:db8:5398::/64",
+        NetworkSegmentType::Underlay,
+        AllocationStrategy::Dynamic,
+    )
+    .await?;
+    let mac_address: MacAddress = "02:00:00:00:53:99".parse()?;
+    let mut txn = pool.begin().await?;
+
+    // The caller's earlier routing lookup did not include this segment.
+    // Reject before creation rather than add an allocator lock after writes.
+    let error = find_or_create_machine_interface_for_family(
+        &mut txn,
+        None,
+        mac_address,
+        &["2001:db8:5398::1".parse()?],
+        FindOrCreateMachineInterfaceOptions {
+            expected_interface: None,
+            is_primary: None,
+            retained_window: None,
+        },
+        IpAddressFamily::Ipv6,
+        &[],
+    )
+    .await
+    .expect_err("an unlocked allocation candidate must be rejected");
+    assert!(
+        matches!(error, DatabaseError::FailedPrecondition(ref message)
+        if message.contains(&segment_id.to_string())),
+        "unexpected allocation error: {error:?}"
+    );
+    assert!(
+        find_by_mac_address(&mut *txn, mac_address)
+            .await?
+            .is_empty()
+    );
+    txn.commit().await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn find_by_machine_id_for_update_locks_non_bmc_interfaces_in_id_order(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -545,6 +669,105 @@ async fn test_preallocate_machine_interface_rejects_conflicting_ip(
         "preallocating a different IP for the same MAC should be rejected, got {result:?}"
     );
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn fixed_preallocation_rechecks_static_address_after_waiting(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let segment_id = create_managed_segment(
+        &pool,
+        "fixed-address-after-wait",
+        "2001:db8:5398::/64",
+        NetworkSegmentType::HostInband,
+        AllocationStrategy::Reserved,
+    )
+    .await?;
+    let mac: MacAddress = "7A:7B:7C:7D:7E:56".parse()?;
+    let mut setup = pool.begin().await?;
+    let interface_id: MachineInterfaceId = sqlx::query_scalar(
+        "INSERT INTO machine_interfaces
+            (segment_id, mac_address, primary_interface, hostname)
+         VALUES ($1, $2, false, 'fixed-address-after-wait') RETURNING id",
+    )
+    .bind(segment_id)
+    .bind(mac)
+    .fetch_one(&mut *setup)
+    .await?;
+    setup.commit().await?;
+
+    let committed_address: IpAddr = "2001:db8:5398::20".parse()?;
+    let requested_address: IpAddr = "2001:db8:5398::21".parse()?;
+    let mut holder = pool.begin().await?;
+    sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+        .bind(interface_id)
+        .fetch_one(&mut *holder)
+        .await?;
+    db::machine_interface_address::insert(
+        &mut holder,
+        interface_id,
+        committed_address,
+        AllocationType::Static,
+    )
+    .await?;
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await?;
+    let mut waiter = pool.begin().await?;
+    let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *waiter)
+        .await?;
+
+    // Preallocation must reject the different static address after waiting;
+    // only the explicit assignment API may replace it.
+    let preallocate = async {
+        let result = preallocate_machine_interface(&mut waiter, mac, requested_address, None).await;
+        if result.is_ok() {
+            waiter.commit().await?;
+        } else {
+            waiter.rollback().await?;
+        }
+        Ok::<_, Box<dyn std::error::Error>>(result)
+    };
+    let commit_static_address = async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                .bind(holder_pid)
+                .bind(waiter_pid)
+                .fetch_one(&pool)
+                .await?;
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        holder.commit().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let (preallocation, assignment) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(preallocate, commit_static_address)
+        })
+        .await?;
+    assignment?;
+    let error = preallocation?.expect_err("a different static reservation must be rejected");
+    match error {
+        DatabaseError::InvalidArgument(message) => {
+            assert!(
+                message.contains(&committed_address.to_string()),
+                "{message}"
+            );
+        }
+        error => panic!("expected an invalid-argument error, got {error:?}"),
+    }
+
+    let mut connection = pool.acquire().await?;
+    let addresses =
+        db::machine_interface_address::find_for_interface(&mut connection, interface_id).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].address, committed_address);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Static);
     Ok(())
 }
 
@@ -1300,6 +1523,108 @@ async fn test_expected_interface_retained_policy_pins_all_dhcp_address_families(
         AllocationType::Dhcp,
     );
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn retention_preserves_static_assignment_after_waiting(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let segment_id = create_managed_segment(
+        &pool,
+        "retention-after-static-assignment",
+        "2001:db8:5398::/64",
+        NetworkSegmentType::HostInband,
+        AllocationStrategy::Dynamic,
+    )
+    .await?;
+    let mac: MacAddress = "7A:7B:7C:7D:7E:57".parse()?;
+    let mut setup = pool.begin().await?;
+    let interface_id: MachineInterfaceId = sqlx::query_scalar(
+        "INSERT INTO machine_interfaces
+            (segment_id, mac_address, interface_type, primary_interface, hostname)
+         VALUES ($1, $2, $3, false, 'retention-after-static-assignment') RETURNING id",
+    )
+    .bind(segment_id)
+    .bind(mac)
+    .bind(InterfaceType::Data)
+    .fetch_one(&mut *setup)
+    .await?;
+    db::machine_interface_address::insert(
+        &mut setup,
+        interface_id,
+        "2001:db8:5398::30".parse()?,
+        AllocationType::Dhcp,
+    )
+    .await?;
+    setup.commit().await?;
+
+    let expected_interface = ExpectedInterface {
+        mac_address: mac,
+        role: ExpectedInterfaceRole::Host,
+        ip_allocation: Some(ExpectedInterfaceIpAllocation::Retained),
+        ..Default::default()
+    };
+    let static_address: IpAddr = "2001:db8:5398::31".parse()?;
+    let mut holder = pool.begin().await?;
+    sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+        .bind(interface_id)
+        .fetch_one(&mut *holder)
+        .await?;
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await?;
+    let mut waiter = pool.begin().await?;
+    let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *waiter)
+        .await?;
+
+    let retain_address = async {
+        retain_expected_machine_interface_address(&mut waiter, &expected_interface).await?;
+        waiter.commit().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let assign_address = async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE pid = $2
+                      AND $1 = ANY(pg_blocking_pids(pid))
+                      AND query ILIKE '%FROM machine_interfaces%FOR UPDATE%'
+                )",
+            )
+            .bind(holder_pid)
+            .bind(waiter_pid)
+            .fetch_one(&pool)
+            .await?;
+            if blocked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let result =
+            db::machine_interface_address::assign_static(&mut holder, interface_id, static_address)
+                .await?;
+        holder.commit().await?;
+        Ok::<_, Box<dyn std::error::Error>>(result)
+    };
+    let (retention, assignment) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(retain_address, assign_address)
+    })
+    .await?;
+    retention?;
+    assert_eq!(
+        assignment?,
+        model::allocation_type::AssignStaticResult::ReplacedDhcp,
+    );
+
+    let mut connection = pool.acquire().await?;
+    let addresses =
+        db::machine_interface_address::find_for_interface(&mut connection, interface_id).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].address, static_address);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Static);
     Ok(())
 }
 

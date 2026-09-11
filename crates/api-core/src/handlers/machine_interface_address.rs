@@ -156,7 +156,14 @@ async fn update_preallocated_machine_interface_with_settings(
     };
     let existing = db::machine_interface::find_by_mac_address(&mut *txn, mac_address).await?;
 
-    if let Some(iface) = existing.first() {
+    if let Some(mut iface) = existing.into_iter().next() {
+        // Skip the lock when the initial read already has an address.
+        // Expected-device callers do not all acquire interface and inventory
+        // locks in the same order.
+        if iface.addresses.is_empty() {
+            db::machine_interface::lock_for_address_assignment(&mut *txn, iface.id).await?;
+            iface = db::machine_interface::find_one(&mut *txn, iface.id).await?;
+        }
         if iface.addresses.is_empty() {
             // No addresses -- safe to assign the static IP.
             db::machine_interface_address::assign_static(txn, iface.id, ip_address).await?;
@@ -461,7 +468,11 @@ pub(crate) async fn find_interface_addresses(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use carbide_instrument::testing::capture_logs;
+    use carbide_uuid::machine::MachineInterfaceId;
+    use carbide_uuid::network::NetworkSegmentId;
 
     use super::*;
 
@@ -476,5 +487,151 @@ mod tests {
 
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].level, tracing::Level::WARN);
+    }
+
+    #[crate::sqlx_test]
+    async fn expected_update_skips_addressed_interfaces_without_locking(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('expected-update-skip', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *setup)
+        .await?;
+        let mac_address: MacAddress = "02:00:00:00:53:99".parse()?;
+        let interface_id: MachineInterfaceId = sqlx::query_scalar(
+            "INSERT INTO machine_interfaces (segment_id, mac_address, hostname, primary_interface)
+             VALUES ($1, $2, 'expected-update-skip', true) RETURNING id",
+        )
+        .bind(segment_id)
+        .bind(mac_address)
+        .fetch_one(&mut *setup)
+        .await?;
+        let address = "2001:db8::5398".parse()?;
+        db::machine_interface_address::insert(
+            &mut setup,
+            interface_id,
+            address,
+            AllocationType::Static,
+        )
+        .await?;
+        setup.commit().await?;
+
+        let mut update_txn = pool.begin().await?;
+        let result = update_preallocated_machine_interface(
+            &mut update_txn,
+            mac_address,
+            "2001:db8::5399".parse()?,
+            None,
+        )
+        .await?;
+        assert_eq!(result, PreallocationSuccess::Skipped);
+
+        // Keep the expected update open. A primary-interface or inventory
+        // writer must still be able to lock the skipped interface.
+        let mut competing_txn = pool.begin().await?;
+        sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(interface_id)
+            .execute(&mut *competing_txn)
+            .await?;
+        let addresses =
+            db::machine_interface_address::find_for_interface(&mut competing_txn, interface_id)
+                .await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].address, address);
+        assert_eq!(addresses[0].allocation_type, AllocationType::Static);
+        competing_txn.commit().await?;
+        update_txn.commit().await?;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn expected_update_preserves_an_address_committed_while_waiting(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup = pool.begin().await?;
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('expected-update-race', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(&mut *setup)
+        .await?;
+        let mac_address: MacAddress = "02:00:00:00:53:98".parse()?;
+        let interface_id: MachineInterfaceId = sqlx::query_scalar(
+            "INSERT INTO machine_interfaces (segment_id, mac_address, hostname, primary_interface)
+             VALUES ($1, $2, 'expected-update-race', true) RETURNING id",
+        )
+        .bind(segment_id)
+        .bind(mac_address)
+        .fetch_one(&mut *setup)
+        .await?;
+        setup.commit().await?;
+
+        let inferred_address = "2001:db8::5398".parse()?;
+        let mut holder = pool.begin().await?;
+        sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+            .bind(interface_id)
+            .execute(&mut *holder)
+            .await?;
+        db::machine_interface_address::insert(
+            &mut holder,
+            interface_id,
+            inferred_address,
+            AllocationType::Slaac,
+        )
+        .await?;
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await?;
+        let mut waiter = pool.begin().await?;
+        let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *waiter)
+            .await?;
+
+        // The expected-data update starts with an addressless snapshot. Its
+        // skip decision must use the SLAAC row committed while it waits.
+        let update = async {
+            let result = update_preallocated_machine_interface(
+                &mut waiter,
+                mac_address,
+                "2001:db8::5399".parse()?,
+                None,
+            )
+            .await?;
+            waiter.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(result)
+        };
+        let release = async {
+            loop {
+                let blocked: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                    .bind(holder_pid)
+                    .bind(waiter_pid)
+                    .fetch_one(&pool)
+                    .await?;
+                if blocked {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            holder.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (updated, released) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(update, release)
+        })
+        .await?;
+        released?;
+        assert_eq!(updated?, PreallocationSuccess::Skipped);
+
+        let mut connection = pool.acquire().await?;
+        let addresses =
+            db::machine_interface_address::find_for_interface(&mut connection, interface_id)
+                .await?;
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].address, inferred_address);
+        assert_eq!(addresses[0].allocation_type, AllocationType::Slaac);
+        Ok(())
     }
 }

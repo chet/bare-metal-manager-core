@@ -17,6 +17,7 @@
 
 use std::net::{IpAddr, Ipv6Addr};
 use std::str::FromStr;
+use std::time::Duration;
 
 use carbide_network::ip::IpAddressFamily;
 use carbide_uuid::machine::{AsMachineId, MachineIdSubtypeTrait, MachineInterfaceId};
@@ -41,6 +42,7 @@ use model::expected_machine::{
     ExpectedMachine, ExpectedMachineData,
 };
 use model::machine_interface::InterfaceType;
+use model::machine_interface_address::MachineInterfaceAssociation;
 use model::network_segment::NetworkSegmentType;
 use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
@@ -49,6 +51,7 @@ use rpc::forge::{ExpireDhcpLeaseRequest, ManagedHostNetworkConfigRequest};
 use crate::DatabaseError;
 use crate::test_support::fixture_config::{FixtureDefault as _, ManagedHostConfigExt as _};
 use crate::tests::common;
+use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::common::rpc_builder::DhcpDiscovery;
 
 const RPC_ADDRESS_FAMILY_V4: i32 = rpc::forge::AddressFamily::V4 as i32;
@@ -246,6 +249,42 @@ async fn interface_addresses_for_mac(
         db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
     txn.rollback().await?;
     Ok((interface_id, addresses))
+}
+
+async fn wait_for_blocked_dhcp_request(
+    pool: &sqlx::PgPool,
+    blocker_pids: &[i32],
+    excluded_pid: Option<i32>,
+    query_fragments: &[&str],
+) -> Result<i32, Box<dyn std::error::Error>> {
+    Ok(tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked_pid = sqlx::query_scalar::<_, i32>(
+                r#"SELECT activity.pid
+                   FROM pg_stat_activity AS activity
+                   WHERE activity.datname = current_database()
+                     AND activity.wait_event_type = 'Lock'
+                     AND $1::integer[] && pg_blocking_pids(activity.pid)
+                     AND ($2::integer IS NULL OR activity.pid != $2)
+                     AND EXISTS (
+                         SELECT 1 FROM unnest($3::text[]) AS fragment
+                         WHERE strpos(lower(activity.query), lower(fragment)) > 0
+                     )
+                   ORDER BY activity.pid
+                   LIMIT 1"#,
+            )
+            .bind(blocker_pids)
+            .bind(excluded_pid)
+            .bind(query_fragments)
+            .fetch_optional(pool)
+            .await?;
+            if let Some(blocked_pid) = blocked_pid {
+                return Ok::<i32, sqlx::Error>(blocked_pid);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??)
 }
 
 #[crate::sqlx_test]
@@ -1056,6 +1095,108 @@ async fn machine_interface_discovery_persists_vendor_strings(
     // DHCP with a previously known vendor string
     // This should not fail
     let _ = dhcp_with_vendor(&env, mac_address, Some("vendor2")).await;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dhcp_v6_concurrent_vendor_bookkeeping_preserves_lease(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool.clone()).await;
+    let mac: MacAddress = "02:00:00:00:95:01".parse()?;
+    let relay = "2001:db8:95::1";
+    let vendor = "concurrent-dhcpv6-vendor";
+    add_ipv6_prefix(&pool, env.admin_segment(), "2001:db8:95::/64", None).await?;
+    enable_slaac_eui64_inference(&pool, env.admin_segment()).await?;
+
+    let initial_response = env
+        .api
+        .discover_dhcp(dhcpv6_discovery(mac, relay, RPC_MESSAGE_KIND_V6_SOLICIT))
+        .await?
+        .into_inner();
+    let interface_id = initial_response
+        .machine_interface_id
+        .expect("the first stateful request should create an interface");
+    let initial_address: IpAddr = initial_response.address.parse()?;
+    sqlx::query("UPDATE machine_interfaces SET last_dhcp = NULL WHERE id = $1")
+        .bind(interface_id)
+        .execute(&pool)
+        .await?;
+
+    let mut info_request = dhcpv6_discovery(mac, relay, RPC_MESSAGE_KIND_V6_INFO_REQUEST);
+    info_request.get_mut().vendor_string = Some(vendor.to_string());
+    let mut stateful_request = dhcpv6_discovery(mac, relay, RPC_MESSAGE_KIND_V6_SOLICIT);
+    stateful_request.get_mut().vendor_string = Some(vendor.to_string());
+
+    let (info_response, stateful_response) = tokio::time::timeout(
+        Duration::from_secs(15),
+        async {
+            let mut gate = pool.begin().await?;
+            sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+                .bind(interface_id)
+                .execute(&mut *gate)
+                .await?;
+            let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *gate)
+                .await?;
+
+            // Queue inference first. A stateful request must not insert the
+            // same vendor key before waiting for this interface; otherwise
+            // inference waits for that key while its writer waits for us.
+            let info = env.api.discover_dhcp(info_request);
+            tokio::pin!(info);
+            let info_blockers = [gate_pid];
+            let info_pid = tokio::select! {
+                result = &mut info => panic!("information-request bypassed the interface gate: {result:?}"),
+                blocked = wait_for_blocked_dhcp_request(
+                    &pool,
+                    &info_blockers,
+                    None,
+                    &[
+                        "SELECT segment_id FROM machine_interfaces",
+                        "INSERT INTO dhcp_entries",
+                    ],
+                ) => blocked?,
+            };
+
+            let stateful = env.api.discover_dhcp(stateful_request);
+            tokio::pin!(stateful);
+            let stateful_blockers = [gate_pid, info_pid];
+            tokio::select! {
+                result = &mut stateful => panic!("stateful request bypassed the interface gate: {result:?}"),
+                blocked = wait_for_blocked_dhcp_request(
+                    &pool,
+                    &stateful_blockers,
+                    Some(info_pid),
+                    &[
+                        "UPDATE machine_interfaces SET last_dhcp",
+                        "INSERT INTO dhcp_entries",
+                    ],
+                ) => { blocked?; },
+            }
+
+            gate.rollback().await?;
+            let (info, stateful) = tokio::join!(&mut info, &mut stateful);
+            Ok::<_, Box<dyn std::error::Error>>((info?.into_inner(), stateful?.into_inner()))
+        },
+    )
+    .await??;
+
+    assert_eq!(info_response.machine_interface_id, Some(interface_id));
+    assert!(info_response.address.is_empty());
+    assert!(info_response.prefix.is_empty());
+    assert_eq!(stateful_response.machine_interface_id, Some(interface_id));
+    assert_eq!(stateful_response.address, initial_response.address);
+    assert_eq!(stateful_response.fqdn, initial_response.fqdn);
+
+    let (_, addresses) = interface_addresses_for_mac(&pool, mac).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].address, initial_address);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
+    assert_eq!(interface.vendors, vec![vendor.to_string()]);
+    assert!(interface.last_dhcp.is_some());
 
     Ok(())
 }
@@ -2785,6 +2926,242 @@ async fn test_dhcp_v6_info_request_does_not_add_slaac_after_stateful(
 }
 
 #[crate::sqlx_test]
+async fn test_dhcp_v4_locks_interface_before_inserting_address(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool.clone()).await;
+    let mac: MacAddress = "02:00:00:00:94:03".parse()?;
+    let initial_response = env
+        .api
+        .discover_dhcp(DhcpDiscovery::builder(mac, FIXTURE_DHCP_RELAY_ADDRESS).tonic_request())
+        .await?
+        .into_inner();
+    let interface_id = initial_response
+        .machine_interface_id
+        .expect("DHCPv4 should create the interface before its lease is removed");
+    let mut removal_txn = pool.begin().await?;
+    assert!(
+        db::machine_interface_address::delete_by_interface_family(
+            &mut removal_txn,
+            interface_id,
+            IpAddressFamily::Ipv4,
+            AllocationType::Dhcp,
+        )
+        .await?
+    );
+    removal_txn.commit().await?;
+
+    // Hold the interface without inserting an address yet. DHCP must wait
+    // here, before its insert can hold an index entry that static needs.
+    let mut assignment_txn = pool.begin().await?;
+    db::machine_interface::lock_for_address_assignment(&mut assignment_txn, interface_id).await?;
+    let assignment_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *assignment_txn)
+        .await?;
+    let static_address: IpAddr = "192.0.2.90".parse()?;
+
+    let request = async {
+        let response = env
+            .api
+            .discover_dhcp(DhcpDiscovery::builder(mac, FIXTURE_DHCP_RELAY_ADDRESS).tonic_request())
+            .await?
+            .into_inner();
+        Ok::<_, Box<dyn std::error::Error>>(response)
+    };
+    let assign_static = async {
+        wait_for_blocked_dhcp_request(
+            &pool,
+            &[assignment_pid],
+            None,
+            &["SELECT segment_id FROM machine_interfaces WHERE id = $1 FOR UPDATE"],
+        )
+        .await?;
+        db::machine_interface_address::assign_static(
+            &mut assignment_txn,
+            interface_id,
+            static_address,
+        )
+        .await?;
+        assignment_txn.commit().await?;
+        Ok::<(), Box<dyn std::error::Error>>(())
+    };
+    let (response, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::try_join!(request, assign_static)
+    })
+    .await??;
+
+    assert_eq!(response.machine_interface_id, Some(interface_id));
+    assert_eq!(response.address, static_address.to_string());
+    assert_eq!(response.prefix, initial_response.prefix);
+    let (persisted_id, addresses) = interface_addresses_for_mac(&pool, mac).await?;
+    assert_eq!(persisted_id, interface_id);
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].address, static_address);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Static);
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dhcp_v6_reads_static_assignment_after_concurrent_commit(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool.clone()).await;
+    let prefix = "2001:db8:94::/64";
+    add_ipv6_prefix(&pool, env.admin_segment(), prefix, None).await?;
+    enable_slaac_eui64_inference(&pool, env.admin_segment()).await?;
+
+    struct Case {
+        name: &'static str,
+        mac: &'static str,
+        static_address: &'static str,
+        prior_slaac: bool,
+        message_kind: i32,
+        expected_address: &'static str,
+        expected_prefix: &'static str,
+    }
+
+    for case in [
+        Case {
+            name: "information-request skips inference after a static assignment commits",
+            mac: "02:00:00:00:94:01",
+            static_address: "2001:db8:94::55",
+            prior_slaac: false,
+            message_kind: RPC_MESSAGE_KIND_V6_INFO_REQUEST,
+            expected_address: "",
+            expected_prefix: "",
+        },
+        Case {
+            name: "stateful request preserves a static replacement of its prior SLAAC row",
+            mac: "02:00:00:00:94:02",
+            static_address: "2001:db8:94::56",
+            prior_slaac: true,
+            message_kind: RPC_MESSAGE_KIND_V6_SOLICIT,
+            expected_address: "2001:db8:94::56",
+            expected_prefix: prefix,
+        },
+    ] {
+        let mac: MacAddress = case.mac.parse()?;
+        let static_address: IpAddr = case.static_address.parse()?;
+        let v4_response = env
+            .api
+            .discover_dhcp(DhcpDiscovery::builder(mac, FIXTURE_DHCP_RELAY_ADDRESS).tonic_request())
+            .await?
+            .into_inner();
+        let ipv4_address: IpAddr = v4_response.address.parse()?;
+        let interface_id = v4_response
+            .machine_interface_id
+            .expect("DHCPv4 should create the interface before the competing requests");
+
+        if case.prior_slaac {
+            let mut setup_txn = pool.begin().await?;
+            db::machine_interface_address::insert(
+                &mut setup_txn,
+                interface_id,
+                expected_slaac_address("2001:db8:94::".parse()?, mac),
+                AllocationType::Slaac,
+            )
+            .await?;
+            setup_txn.commit().await?;
+        }
+
+        // The competing writer uses the DB assignment entry point, not an
+        // RPC. Keep its address uncommitted so DHCP initially sees either no
+        // IPv6 row or the SLAAC row being replaced.
+        let mut assignment_txn = pool.begin().await?;
+        sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+            .bind(interface_id)
+            .execute(&mut *assignment_txn)
+            .await?;
+        db::machine_interface_address::assign_static(
+            &mut assignment_txn,
+            interface_id,
+            static_address,
+        )
+        .await?;
+        let assignment_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *assignment_txn)
+            .await?;
+
+        let request = tokio::time::timeout(
+            Duration::from_secs(10),
+            env.api
+                .discover_dhcp(dhcpv6_discovery(mac, "2001:db8:94::1", case.message_kind)),
+        );
+        let commit_assignment = async {
+            // Check the actual database wait before committing. Accept the
+            // address write too: without the selection lock, that is where
+            // the stale decision waits and then fails after this commit.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let request_is_blocked: bool = sqlx::query_scalar(
+                        r#"SELECT EXISTS (
+                            SELECT 1 FROM pg_stat_activity AS activity
+                            WHERE activity.datname = current_database()
+                              AND activity.wait_event_type = 'Lock'
+                              AND $1 = ANY(pg_blocking_pids(activity.pid))
+                              AND (
+                                  activity.query ILIKE '%FROM machine_interfaces%FOR UPDATE%'
+                                  OR activity.query ILIKE '%INSERT INTO machine_interface_addresses%'
+                                  OR activity.query ILIKE '%DELETE FROM machine_interface_addresses%'
+                              )
+                        )"#,
+                    )
+                    .bind(assignment_pid)
+                    .fetch_one(&pool)
+                    .await?;
+                    if request_is_blocked {
+                        return Ok::<(), sqlx::Error>(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{}: DHCP never waited for the static assignment", case.name))?;
+            assignment_txn.commit().await?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        let (response, committed) = tokio::join!(request, commit_assignment);
+        committed?;
+        let response = response
+            .unwrap_or_else(|_| {
+                panic!("{}: DHCP did not finish after the static commit", case.name)
+            })
+            .unwrap_or_else(|error| panic!("{}: {error}", case.name))
+            .into_inner();
+
+        assert_eq!(
+            response.machine_interface_id,
+            Some(interface_id),
+            "{}",
+            case.name,
+        );
+        assert_eq!(response.address, case.expected_address, "{}", case.name);
+        assert_eq!(response.prefix, case.expected_prefix, "{}", case.name);
+        assert_eq!(response.fqdn, v4_response.fqdn, "{}", case.name);
+        let (persisted_id, addresses) = interface_addresses_for_mac(&pool, mac).await?;
+        assert_eq!(persisted_id, interface_id, "{}", case.name);
+        assert_eq!(addresses.len(), 2, "{}: {addresses:?}", case.name);
+        assert!(
+            addresses.iter().any(|address| {
+                address.address == ipv4_address && address.allocation_type == AllocationType::Dhcp
+            }),
+            "{}: IPv4 lease changed: {addresses:?}",
+            case.name,
+        );
+        assert!(
+            addresses.iter().any(|address| {
+                address.address == static_address
+                    && address.allocation_type == AllocationType::Static
+            }),
+            "{}: static IPv6 assignment changed: {addresses:?}",
+            case.name,
+        );
+    }
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_dhcp_v6_solicit_exact_link_exhaustion_does_not_fallback_to_prefix_candidate(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3292,6 +3669,168 @@ async fn test_dhcp_v6_solicit_promotes_predicted_interface_by_link_address(
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
     assert_eq!(addresses[0].address, response_address);
+    txn.rollback().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_dhcp_v6_reserved_prediction_promotion_serializes_primary_request(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_host_inband(pool.clone()).await;
+    let mock_host = ManagedHostConfig {
+        dpus: vec![],
+        ..ManagedHostConfig::default()
+    };
+    let predicted_mac = *mock_host.non_dpu_macs.first().unwrap();
+    let mock_host = mock_host.with_expected_machine_data(ExpectedMachineData {
+        interfaces: vec![ExpectedInterface {
+            mac_address: predicted_mac,
+            primary: Some(true),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let _mock = site_explorer::ingest_zero_dpu_host_awaiting_first_lease(&env, mock_host).await?;
+    let (prediction, segment_id) = {
+        let mut txn = pool.begin().await?;
+        let prediction =
+            db::predicted_machine_interface::find_by_mac_address(&mut txn, predicted_mac)
+                .await?
+                .expect("zero-DPU ingest should create a predicted interface");
+        assert!(prediction.primary_interface);
+        let segment = db::network_segment::for_relay(
+            &mut txn,
+            FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip(),
+        )
+        .await?
+        .expect("the fixture gateway should resolve the host-inband segment");
+        txn.rollback().await?;
+        (prediction, segment.id)
+    };
+
+    let existing_mac: MacAddress = "02:00:00:00:96:01".parse()?;
+    let existing_response = env
+        .api
+        .discover_dhcp(
+            DhcpDiscovery::builder(
+                existing_mac,
+                FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY.ip(),
+            )
+            .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let existing_id = existing_response
+        .machine_interface_id
+        .expect("the first IPv4 request should create an interface");
+    let ipv4_address: IpAddr = existing_response.address.parse()?;
+    assert!(ipv4_address.is_ipv4());
+    let mut txn = pool.begin().await?;
+    db::machine_interface::associate_interface_with_machine(
+        &existing_id,
+        MachineInterfaceAssociation::Machine(prediction.machine_id),
+        &mut txn,
+    )
+    .await?;
+    db::machine_interface::set_primary_interface(&existing_id, true, &mut txn).await?;
+    txn.commit().await?;
+    let initial_interface = db::machine_interface::find_one(&pool, existing_id).await?;
+    assert!(initial_interface.primary_interface);
+    assert_eq!(initial_interface.machine_id, Some(prediction.machine_id));
+    assert_eq!(initial_interface.segment_id, segment_id);
+    assert_eq!(initial_interface.addresses, vec![ipv4_address]);
+
+    let relay = "2001:db8:96::1";
+    add_ipv6_prefix(&pool, segment_id, "2001:db8:96::/64", None).await?;
+    set_segment_reserved(&pool, segment_id).await?;
+
+    let (promotion, existing) = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut gate = pool.begin().await?;
+        sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
+            .bind(existing_id)
+            .execute(&mut *gate)
+            .await?;
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *gate)
+            .await?;
+
+        // Promotion must reserve the segment before demoting the primary.
+        // Otherwise its row lock can block a lease request that owns the
+        // segment lock promotion will need next.
+        let promotion = env.api.discover_dhcp(dhcpv6_discovery(
+            predicted_mac,
+            relay,
+            RPC_MESSAGE_KIND_V6_SOLICIT,
+        ));
+        tokio::pin!(promotion);
+        let promotion_pid = tokio::select! {
+            result = &mut promotion => panic!("promotion bypassed the primary interface gate: {result:?}"),
+            blocked = wait_for_blocked_query(
+                &pool,
+                gate_pid,
+                "UPDATE machine_interfaces SET primary_interface=false",
+            ) => blocked,
+        };
+
+        let existing = env.api.discover_dhcp(dhcpv6_discovery(
+            existing_mac,
+            relay,
+            RPC_MESSAGE_KIND_V6_SOLICIT,
+        ));
+        tokio::pin!(existing);
+        tokio::select! {
+            result = &mut existing => panic!("lease request bypassed promotion's segment lock: {result:?}"),
+            _ = wait_for_blocked_query(
+                &pool,
+                promotion_pid,
+                "pg_advisory_xact_lock",
+            ) => {},
+        }
+
+        gate.rollback().await?;
+        let results = tokio::join!(&mut promotion, &mut existing);
+        Ok::<_, Box<dyn std::error::Error>>(results)
+    })
+    .await??;
+
+    for result in [promotion, existing] {
+        let status = result.expect_err("Reserved segments require a static IPv6 reservation");
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert!(
+            status
+                .message()
+                .contains("configured for static DHCP leases only; no static reservation"),
+            "unexpected allocation failure: {status}",
+        );
+    }
+
+    let existing_interface = db::machine_interface::find_one(&pool, existing_id).await?;
+    assert!(existing_interface.primary_interface);
+    assert_eq!(existing_interface.machine_id, Some(prediction.machine_id));
+    assert_eq!(existing_interface.segment_id, segment_id);
+    assert_eq!(existing_interface.addresses, vec![ipv4_address]);
+    assert_eq!(existing_interface.last_dhcp, initial_interface.last_dhcp);
+    let (_, addresses) = interface_addresses_for_mac(&pool, existing_mac).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].address, ipv4_address);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
+
+    let mut txn = pool.begin().await?;
+    let retained_prediction =
+        db::predicted_machine_interface::find_by_mac_address(&mut txn, predicted_mac)
+            .await?
+            .expect("failed promotion should leave the prediction available for retry");
+    assert_eq!(retained_prediction.id, prediction.id);
+    assert_eq!(retained_prediction.machine_id, prediction.machine_id);
+    assert_eq!(retained_prediction.mac_address, predicted_mac);
+    assert!(retained_prediction.primary_interface);
+    assert!(
+        db::machine_interface::find_by_mac_address(&mut *txn, predicted_mac)
+            .await?
+            .is_empty()
+    );
     txn.rollback().await?;
 
     Ok(())
