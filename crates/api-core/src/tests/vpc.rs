@@ -187,6 +187,18 @@ async fn change_vpc_routing_profile_retains_allocations_and_creation_intent(
             .as_ref()
             .and_then(|status| status.vni)
             .expect("active VNI");
+        let destination_vni = if requested_vni.is_some() {
+            let (_, value, _) = vpc_vni_pool_state(&env)
+                .await?
+                .into_iter()
+                .find(|(name, _, state)| {
+                    name == external_pool && state.0 == ResourcePoolEntryState::Free
+                })
+                .expect("free automatic external VNI");
+            Some(value.parse::<u32>()?)
+        } else {
+            None
+        };
         let forward = env
             .api
             .change_vpc_routing_profile(tonic::Request::new(
@@ -194,6 +206,7 @@ async fn change_vpc_routing_profile_retains_allocations_and_creation_intent(
                     id: Some(vpc_id),
                     if_version_match: Some(before.version.clone()),
                     routing_profile_type: "EXTERNAL".to_string(),
+                    vni: destination_vni,
                 },
             ))
             .await?
@@ -201,6 +214,9 @@ async fn change_vpc_routing_profile_retains_allocations_and_creation_intent(
         assert_eq!(forward.id, Some(vpc_id));
         assert_eq!(forward.routing_profile_type.as_deref(), Some("EXTERNAL"));
         assert_ne!(forward.active_vni, internal_vni);
+        if let Some(vni) = destination_vni {
+            assert_eq!(forward.active_vni, vni);
+        }
         assert_eq!(
             forward.retained_allocation,
             Some(rpc::forge::VpcRetainedVniAllocation {
@@ -244,6 +260,29 @@ async fn change_vpc_routing_profile_retains_allocations_and_creation_intent(
                 .await?;
         }
         let allocations_before_reverse = vpc_vni_pool_state(&env).await?;
+        if requested_vni.is_some() {
+            let other_vni = internal_vni + 1;
+            assert_eq!(
+                resource_pool_entry_state(&env, internal_pool, i32::try_from(other_vni)?).await?,
+                ResourcePoolEntryState::Free
+            );
+            let error = env
+                .api
+                .change_vpc_routing_profile(tonic::Request::new(
+                    rpc::forge::VpcChangeRoutingProfileRequest {
+                        id: Some(vpc_id),
+                        if_version_match: Some(forward.version.clone()),
+                        routing_profile_type: "INTERNAL".to_string(),
+                        vni: Some(other_vni),
+                    },
+                ))
+                .await
+                .expect_err("a free VNI cannot replace a retained allocation");
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert!(error.message().contains(&other_vni.to_string()), "{error}");
+            assert_eq!(find_test_vpc(&env, vpc_id).await?, after);
+            assert_eq!(vpc_vni_pool_state(&env).await?, allocations_before_reverse);
+        }
         let reverse = env
             .api
             .change_vpc_routing_profile(tonic::Request::new(
@@ -251,6 +290,7 @@ async fn change_vpc_routing_profile_retains_allocations_and_creation_intent(
                     id: Some(vpc_id),
                     if_version_match: Some(forward.version),
                     routing_profile_type: "INTERNAL".to_string(),
+                    vni: requested_vni.map(|_| internal_vni),
                 },
             ))
             .await?
@@ -298,6 +338,7 @@ async fn change_vpc_routing_profile_rechecks_tenant_access_for_retained_vni(
                 id: Some(vpc_id),
                 if_version_match: Some(created.version),
                 routing_profile_type: "EXTERNAL".to_string(),
+                vni: None,
             },
         ))
         .await?
@@ -311,6 +352,7 @@ async fn change_vpc_routing_profile_rechecks_tenant_access_for_retained_vni(
                 id: Some(vpc_id),
                 if_version_match: Some(forward.version),
                 routing_profile_type: "INTERNAL".to_string(),
+                vni: None,
             },
         ))
         .await
@@ -340,20 +382,100 @@ async fn change_vpc_routing_profile_rolls_back_allocation_on_write_failure(
     sqlx::query("ALTER TABLE vpcs ADD CONSTRAINT reject_profile_change CHECK (routing_profile_type <> 'EXTERNAL') NOT VALID")
         .execute(&env.pool)
         .await?;
-    let error = env
-        .api
-        .change_vpc_routing_profile(tonic::Request::new(
-            rpc::forge::VpcChangeRoutingProfileRequest {
-                id: Some(vpc_id),
-                if_version_match: Some(before.version.clone()),
-                routing_profile_type: "EXTERNAL".to_string(),
-            },
-        ))
-        .await
-        .expect_err("injected VPC write failure");
-    assert!(error.message().contains("reject_profile_change"), "{error}");
-    assert_eq!(find_test_vpc(&env, vpc_id).await?, before);
-    assert_eq!(vpc_vni_pool_state(&env).await?, allocations_before);
+    for vni in [None, Some(50001)] {
+        let error = env
+            .api
+            .change_vpc_routing_profile(tonic::Request::new(
+                rpc::forge::VpcChangeRoutingProfileRequest {
+                    id: Some(vpc_id),
+                    if_version_match: Some(before.version.clone()),
+                    routing_profile_type: "EXTERNAL".to_string(),
+                    vni,
+                },
+            ))
+            .await
+            .expect_err("injected VPC write failure");
+        assert!(
+            error.message().contains("reject_profile_change"),
+            "{vni:?}: {error}"
+        );
+        assert_eq!(find_test_vpc(&env, vpc_id).await?, before, "{vni:?}");
+        assert_eq!(
+            vpc_vni_pool_state(&env).await?,
+            allocations_before,
+            "{vni:?}"
+        );
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn change_vpc_routing_profile_rejects_unavailable_exact_vni_without_changes(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    struct Case<'a> {
+        scenario: &'static str,
+        vni: u32,
+        message_contains: &'a str,
+    }
+
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let before = create_routing_profile_vpc(&env, "unavailable-exact-vni", None).await?;
+    let vpc_id = before.id.expect("VPC ID");
+    let active_vni = before
+        .status
+        .as_ref()
+        .and_then(|status| status.vni)
+        .expect("active VNI");
+    let allocations_before = vpc_vni_pool_state(&env).await?;
+
+    for case in [
+        Case {
+            scenario: "missing destination value",
+            vni: 50000,
+            message_contains: env.common_pools.ethernet.pool_external_vpc_vni.name(),
+        },
+        Case {
+            scenario: "already active",
+            vni: active_vni,
+            message_contains: "already active",
+        },
+    ] {
+        let scenario = case.scenario;
+        let error = env
+            .api
+            .change_vpc_routing_profile(tonic::Request::new(
+                rpc::forge::VpcChangeRoutingProfileRequest {
+                    id: Some(vpc_id),
+                    if_version_match: Some(before.version.clone()),
+                    routing_profile_type: "EXTERNAL".to_string(),
+                    vni: Some(case.vni),
+                },
+            ))
+            .await
+            .expect_err(scenario);
+        assert_eq!(
+            error.code(),
+            tonic::Code::FailedPrecondition,
+            "{scenario}: {error}"
+        );
+        assert!(
+            error.message().contains(&case.vni.to_string()),
+            "{scenario}: {error}"
+        );
+        assert!(
+            error.message().contains(case.message_contains),
+            "{scenario}: {error}"
+        );
+        assert_eq!(find_test_vpc(&env, vpc_id).await?, before, "{scenario}");
+        assert_eq!(
+            vpc_vni_pool_state(&env).await?,
+            allocations_before,
+            "{scenario}"
+        );
+    }
     Ok(())
 }
 
@@ -538,6 +660,7 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
                     id: Some(vpc_id),
                     if_version_match: Some(before.version.clone()),
                     routing_profile_type: expected.destination.to_string(),
+                    vni: None,
                 },
             ))
             .await
@@ -608,6 +731,7 @@ async fn change_vpc_routing_profile_same_version_commits_once(
         id: Some(vpc_id),
         if_version_match: Some(before.version.clone()),
         routing_profile_type: "EXTERNAL".to_string(),
+        vni: None,
     };
     let (first, second) = tokio::join!(
         env.api
@@ -643,6 +767,69 @@ async fn change_vpc_routing_profile_same_version_commits_once(
 }
 
 #[crate::sqlx_test]
+async fn change_vpc_routing_profile_exact_vni_has_one_owner_under_concurrent_requests(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env =
+        create_test_env_with_overrides(pool, TestEnvOverrides::default().with_fnn_config(None))
+            .await;
+    let before = [
+        create_routing_profile_vpc(&env, "first-exact-vni-request", None).await?,
+        create_routing_profile_vpc(&env, "second-exact-vni-request", None).await?,
+    ];
+    let external_pool = env.common_pools.ethernet.pool_external_vpc_vni.name();
+    let mut expected_allocations = vpc_vni_pool_state(&env).await?;
+    let requested_vni = 50001;
+    let requests = before
+        .each_ref()
+        .map(|vpc| rpc::forge::VpcChangeRoutingProfileRequest {
+            id: vpc.id,
+            if_version_match: Some(vpc.version.clone()),
+            routing_profile_type: "EXTERNAL".to_string(),
+            vni: Some(requested_vni),
+        });
+    let (first, second) = tokio::join!(
+        env.api
+            .change_vpc_routing_profile(tonic::Request::new(requests[0].clone())),
+        env.api
+            .change_vpc_routing_profile(tonic::Request::new(requests[1].clone())),
+    );
+    let (winner, changed, rejected) = match (first, second) {
+        (Ok(changed), Err(rejected)) => (0, changed.into_inner(), rejected),
+        (Err(rejected), Ok(changed)) => (1, changed.into_inner(), rejected),
+        other => panic!("exactly one VPC must claim the requested VNI: {other:?}"),
+    };
+    let winner_before = &before[winner];
+    let winner_id = winner_before.id.expect("winning VPC ID");
+    let loser_before = &before[1 - winner];
+    assert_eq!(rejected.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        rejected.message().contains(&requested_vni.to_string()),
+        "{rejected}"
+    );
+    assert!(rejected.message().contains(external_pool), "{rejected}");
+    assert_eq!(changed.id, Some(winner_id));
+    assert_eq!(changed.routing_profile_type.as_deref(), Some("EXTERNAL"));
+    assert_eq!(changed.active_vni, requested_vni);
+    assert_eq!(
+        find_test_vpc(&env, loser_before.id.expect("losing VPC ID")).await?,
+        *loser_before
+    );
+    let (_, _, state) = expected_allocations
+        .iter_mut()
+        .find(|(name, value, _)| name == external_pool && value == &requested_vni.to_string())
+        .expect("requested external VNI");
+    assert_eq!(state.0, ResourcePoolEntryState::Free);
+    *state = sqlx::types::Json(ResourcePoolEntryState::Allocated {
+        owner: winner_id.to_string(),
+        owner_type: OwnerType::Vpc.to_string(),
+    });
+    let allocations_after = vpc_vni_pool_state(&env).await?;
+    assert_eq!(allocations_after, expected_allocations);
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn change_vpc_routing_profile_rejects_site_global_vni(
     pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
@@ -663,6 +850,7 @@ async fn change_vpc_routing_profile_rejects_site_global_vni(
                 id: Some(vpc_id),
                 if_version_match: Some(before.version.clone()),
                 routing_profile_type: "EXTERNAL".to_string(),
+                vni: None,
             },
         ))
         .await
@@ -699,6 +887,7 @@ async fn change_vpc_routing_profile_requires_fnn_configuration(
                 id: Some(vpc_id),
                 if_version_match: Some(before.version.clone()),
                 routing_profile_type: "EXTERNAL".to_string(),
+                vni: None,
             },
         ))
         .await

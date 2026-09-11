@@ -64473,9 +64473,10 @@ func (x *VpcRetainedVniAllocation) GetVni() uint32 {
 // Changes a supported FNN VPC between configured profiles with opposite
 // internal settings. The destination must satisfy the persisted tenant's
 // access tier (omitted tiers retain the creation-time default of zero).
-// Reuses an existing destination allocation, otherwise automatically selects
-// an available VNI from the destination pool. The previous allocation remains
-// reserved; ReleaseVpcInactiveVni is a separate operator action.
+// Reuses an existing destination allocation, otherwise claims the requested
+// VNI or automatically selects an available VNI from the destination pool.
+// The previous allocation remains reserved; ReleaseVpcInactiveVni is a
+// separate operator action.
 //
 // Requires FNN configuration, named source/destination profiles, distinct
 // nonoverlapping materialized pools, and VNIs in 1..16777215. Site-global VNIs,
@@ -64483,8 +64484,9 @@ func (x *VpcRetainedVniAllocation) GetVni() uint32 {
 // attachments are unsupported. Empty override reset objects are allowed.
 // Same-polarity changes and a destination pool already holding the active VNI
 // are rejected. Unsupported configurations and inconsistent ownership fail
-// FAILED_PRECONDITION; missing profiles/VPCs fail NOT_FOUND; pool exhaustion
-// fails RESOURCE_EXHAUSTED. Rejected requests commit no changes.
+// FAILED_PRECONDITION; missing profiles/VPCs fail NOT_FOUND; automatic allocation
+// from an exhausted pool fails RESOURCE_EXHAUSTED. Rejected requests commit
+// no changes.
 //
 // Preserves the VPC ID, prefixes, instances, addresses, NSGs, metadata, and
 // creation-time requested VNI. External routing does not supply public
@@ -64508,8 +64510,19 @@ type VpcChangeRoutingProfileRequest struct {
 	// Required nonempty configuration-defined destination name, not a closed
 	// INTERNAL/EXTERNAL enum. Omission or an empty name fails INVALID_ARGUMENT.
 	RoutingProfileType string `protobuf:"bytes,3,opt,name=routing_profile_type,json=routingProfileType,proto3" json:"routing_profile_type,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Optional exact destination VNI. Omission reuses a retained destination,
+	// otherwise allocates automatically. A retained destination must match an
+	// explicit request; a different value fails FAILED_PRECONDITION even if free.
+	// Without a retained destination, the requested value must be a free
+	// materialized destination-pool entry, regardless of its auto_assign flag.
+	// Missing or occupied entries and the active VNI fail FAILED_PRECONDITION
+	// without falling back. Zero and values above 16777215 fail INVALID_ARGUMENT.
+	// Use only when every serving Core supports this field: older Core ignores
+	// it and may choose another VNI. Verify the returned profile and active VNI;
+	// a mismatched or lost response does not undo a committed change.
+	Vni           *uint32 `protobuf:"varint,4,opt,name=vni,proto3,oneof" json:"vni,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *VpcChangeRoutingProfileRequest) Reset() {
@@ -64561,6 +64574,13 @@ func (x *VpcChangeRoutingProfileRequest) GetRoutingProfileType() string {
 		return x.RoutingProfileType
 	}
 	return ""
+}
+
+func (x *VpcChangeRoutingProfileRequest) GetVni() uint32 {
+	if x != nil && x.Vni != nil {
+		return *x.Vni
+	}
+	return 0
 }
 
 type DNSMessage_DNSQuestion struct {
@@ -71705,12 +71725,14 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x15_routing_profile_type\"I\n" +
 	"\x18VpcRetainedVniAllocation\x12\x1b\n" +
 	"\tpool_name\x18\x01 \x01(\tR\bpoolName\x12\x10\n" +
-	"\x03vni\x18\x02 \x01(\rR\x03vni\"\xb5\x01\n" +
+	"\x03vni\x18\x02 \x01(\rR\x03vni\"\xd4\x01\n" +
 	"\x1eVpcChangeRoutingProfileRequest\x12\x1d\n" +
 	"\x02id\x18\x01 \x01(\v2\r.common.VpcIdR\x02id\x12-\n" +
 	"\x10if_version_match\x18\x02 \x01(\tH\x00R\x0eifVersionMatch\x88\x01\x01\x120\n" +
-	"\x14routing_profile_type\x18\x03 \x01(\tR\x12routingProfileTypeB\x13\n" +
-	"\x11_if_version_match*s\n" +
+	"\x14routing_profile_type\x18\x03 \x01(\tR\x12routingProfileType\x12\x15\n" +
+	"\x03vni\x18\x04 \x01(\rH\x01R\x03vni\x88\x01\x01B\x13\n" +
+	"\x11_if_version_matchB\x06\n" +
+	"\x04_vni*s\n" +
 	"\x15SpdmAttestationStatus\x12\x18\n" +
 	"\x14SPDM_ATT_IN_PROGRESS\x10\x00\x12\x16\n" +
 	"\x12SPDM_ATT_CANCELLED\x10\x01\x12\x13\n" +

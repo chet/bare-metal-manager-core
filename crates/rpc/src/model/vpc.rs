@@ -367,10 +367,24 @@ impl TryFrom<rpc::forge::VpcChangeRoutingProfileRequest> for ChangeVpcRoutingPro
                 "routing_profile_type must not be empty".to_string(),
             ));
         }
+        let vni = request
+            .vni
+            .map(|vni| {
+                i32::try_from(vni)
+                    .ok()
+                    .filter(|vni| (1..=0x00ff_ffff).contains(vni))
+                    .ok_or_else(|| {
+                        RpcDataConversionError::InvalidArgument(format!(
+                            "requested VNI `{vni}` must be between 1 and 16777215"
+                        ))
+                    })
+            })
+            .transpose()?;
         Ok(Self {
             id,
             if_version_match,
             routing_profile_type: request.routing_profile_type,
+            vni,
         })
     }
 }
@@ -417,6 +431,7 @@ mod tests {
             id: Some(vpc_id),
             if_version_match: Some("V1-T0".to_string()),
             routing_profile_type: "PARTNER".to_string(),
+            vni: None,
         };
         value_scenarios!(
             run = |input| ChangeVpcRoutingProfile::try_from(input)
@@ -426,6 +441,7 @@ mod tests {
                     id: vpc_id,
                     if_version_match: "V1-T0".parse().unwrap(),
                     routing_profile_type: "PARTNER".to_string(),
+                    vni: None,
                 }),
             }
             "missing ID" {
@@ -447,6 +463,31 @@ mod tests {
                 rpc::forge::VpcChangeRoutingProfileRequest {
                     routing_profile_type: String::new(), ..request
                 } => Err(tonic::Code::InvalidArgument),
+            }
+        );
+    }
+
+    #[test]
+    fn vpc_routing_change_validates_requested_vni() {
+        value_scenarios!(
+            run = |vni| ChangeVpcRoutingProfile::try_from(
+                rpc::forge::VpcChangeRoutingProfileRequest {
+                    id: Some(VpcId::new()),
+                    if_version_match: Some("V1-T0".to_string()),
+                    routing_profile_type: "EXTERNAL".to_string(),
+                    vni: Some(vni),
+                }
+            )
+            .map(|change| change.vni)
+            .map_err(|error| tonic::Status::from(error).code());
+            "valid exact VNI boundaries" {
+                1 => Ok(Some(1)),
+                16_777_215 => Ok(Some(16_777_215)),
+            }
+            "invalid exact VNI" {
+                0 => Err(tonic::Code::InvalidArgument),
+                16_777_216 => Err(tonic::Code::InvalidArgument),
+                u32::MAX => Err(tonic::Code::InvalidArgument),
             }
         );
     }

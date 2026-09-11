@@ -164,6 +164,9 @@ pub struct ChangeVpcRoutingProfile {
     pub if_version_match: ConfigVersion,
     /// Configuration-defined destination profile name.
     pub routing_profile_type: String,
+    /// Optional exact destination VNI in 1..=16777215. Must match retained
+    /// destination ownership; omission reuses it or allocates automatically.
+    pub vni: Option<i32>,
 }
 
 /// UpdateVpcVirtualization exists as a mechanism to translate

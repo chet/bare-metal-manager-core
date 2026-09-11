@@ -396,6 +396,7 @@ async fn change_vpc_routing_profile_preserves_workload_and_checks_interface_over
         id: Some(vpc_id),
         if_version_match: Some(before.version.clone()),
         routing_profile_type: "EXTERNAL".to_string(),
+        vni: None,
     };
     for case in [
         InterfaceCase {
@@ -492,6 +493,7 @@ async fn change_vpc_routing_profile_preserves_workload_and_checks_interface_over
             id: Some(vpc_id),
             if_version_match: Some(before_reverse.version.clone()),
             routing_profile_type: "INTERNAL".to_string(),
+            vni: None,
         }))
         .await
         .expect_err("new tenant-managed prefix prevents reversal");

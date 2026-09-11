@@ -10886,9 +10886,10 @@ message VpcRetainedVniAllocation {
 // Changes a supported FNN VPC between configured profiles with opposite
 // internal settings. The destination must satisfy the persisted tenant's
 // access tier (omitted tiers retain the creation-time default of zero).
-// Reuses an existing destination allocation, otherwise automatically selects
-// an available VNI from the destination pool. The previous allocation remains
-// reserved; ReleaseVpcInactiveVni is a separate operator action.
+// Reuses an existing destination allocation, otherwise claims the requested
+// VNI or automatically selects an available VNI from the destination pool.
+// The previous allocation remains reserved; ReleaseVpcInactiveVni is a
+// separate operator action.
 //
 // Requires FNN configuration, named source/destination profiles, distinct
 // nonoverlapping materialized pools, and VNIs in 1..16777215. Site-global VNIs,
@@ -10896,8 +10897,9 @@ message VpcRetainedVniAllocation {
 // attachments are unsupported. Empty override reset objects are allowed.
 // Same-polarity changes and a destination pool already holding the active VNI
 // are rejected. Unsupported configurations and inconsistent ownership fail
-// FAILED_PRECONDITION; missing profiles/VPCs fail NOT_FOUND; pool exhaustion
-// fails RESOURCE_EXHAUSTED. Rejected requests commit no changes.
+// FAILED_PRECONDITION; missing profiles/VPCs fail NOT_FOUND; automatic allocation
+// from an exhausted pool fails RESOURCE_EXHAUSTED. Rejected requests commit
+// no changes.
 //
 // Preserves the VPC ID, prefixes, instances, addresses, NSGs, metadata, and
 // creation-time requested VNI. External routing does not supply public
@@ -10920,4 +10922,15 @@ message VpcChangeRoutingProfileRequest {
   // Required nonempty configuration-defined destination name, not a closed
   // INTERNAL/EXTERNAL enum. Omission or an empty name fails INVALID_ARGUMENT.
   string routing_profile_type = 3;
+  // Optional exact destination VNI. Omission reuses a retained destination,
+  // otherwise allocates automatically. A retained destination must match an
+  // explicit request; a different value fails FAILED_PRECONDITION even if free.
+  // Without a retained destination, the requested value must be a free
+  // materialized destination-pool entry, regardless of its auto_assign flag.
+  // Missing or occupied entries and the active VNI fail FAILED_PRECONDITION
+  // without falling back. Zero and values above 16777215 fail INVALID_ARGUMENT.
+  // Use only when every serving Core supports this field: older Core ignores
+  // it and may choose another VNI. Verify the returned profile and active VNI;
+  // a mismatched or lost response does not undo a committed change.
+  optional uint32 vni = 4;
 }

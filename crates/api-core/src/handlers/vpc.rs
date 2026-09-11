@@ -366,9 +366,26 @@ pub(crate) async fn change_routing_profile(
     }
     // The active VNI becomes retained and must remain releasable too.
     validate_transition_vni(allocations.active_vni)?;
-    let destination_vni = match allocations.inactive {
-        Some((_, vni)) => vni,
-        None => {
+    if change.vni == Some(allocations.active_vni) {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "requested VNI `{}` is already active on this VPC",
+            allocations.active_vni,
+        ))
+        .into());
+    }
+    let destination_vni = match (allocations.inactive, change.vni) {
+        (Some((_, retained_vni)), Some(requested_vni)) if retained_vni != requested_vni => {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "requested VNI `{requested_vni}` must match retained VNI `{retained_vni}` in pool `{}`",
+                destination_pool.name(),
+            ))
+            .into());
+        }
+        (Some((_, vni)), _) => vni,
+        (None, Some(vni)) => {
+            allocate_exact_vpc_vni(destination_pool, &mut txn, &vpc.id.to_string(), vni).await?
+        }
+        (None, None) => {
             allocate_vpc_vni(
                 api,
                 &mut txn,
@@ -999,6 +1016,37 @@ async fn allocate_vpc_vni(
             Err(err.into())
         }
     }
+}
+
+/// `allocate_exact_vpc_vni` claims a requested VNI from the already validated pool.
+/// Unlike VPC creation, routing changes accept either assignment partition.
+async fn allocate_exact_vpc_vni(
+    pool: &resource_pool::ResourcePool<i32>,
+    txn: &mut PgConnection,
+    owner_id: &str,
+    vni: i32,
+) -> Result<i32, CarbideError> {
+    db::resource_pool::allocate_exact(pool, txn, resource_pool::OwnerType::Vpc, owner_id, vni)
+        .await
+        .map_err(|error| {
+            if matches!(error, db::DatabaseError::FailedPrecondition(_)) {
+                db::resource_pool::emit_requested_vni_unavailable(
+                    pool.value_type,
+                    owner_id,
+                    vni,
+                    pool.name(),
+                );
+            } else {
+                db::resource_pool::emit_database_allocation_failure(
+                    pool.value_type,
+                    owner_id,
+                    true,
+                    pool.name(),
+                    &error,
+                );
+            }
+            CarbideError::from(error)
+        })
 }
 
 /// Resolution of routing-related state for a VPC at create time. The
