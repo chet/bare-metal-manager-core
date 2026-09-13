@@ -852,14 +852,32 @@ linked to a `VpcPrefix`; every other direct `NetworkPrefix` overlap on an
 attached segment is rejected. An unattached `CreateNetworkSegment` request does
 not run these checks, but a later attachment does.
 
-These handlers do not validate changes to peering or VPC policy, or Instance
-paths that retain routing state. They also do not cover startup or audit every
-writer. Those checks are tracked in
-[#5114](https://github.com/dsx-ai-factory/infra-controller/issues/5114) and
-[#5115](https://github.com/dsx-ai-factory/infra-controller/issues/5115), while startup
-and complete writer coverage are tracked in
-[#5116](https://github.com/dsx-ai-factory/infra-controller/issues/5116). All three must
-land before the database cutover in
+With `tenant_prefix_overlap_enabled = true`, peering creation, `VpcPrefix`
+creation, and VPC virtualization changes that add imports also check each
+affected receiver's local and imported prefixes. Core returns `InvalidArgument`
+if a change would make one VPC receive
+overlapping address space from different VPCs. Direct peer imports follow the
+renderer, including its independent VNI imports; there are no transitive peer
+imports. Prefixes awaiting removal still count.
+
+VPC routing-profile changes, VPC NSG assignments, and NSG rule changes check
+the affected tenant-serving FNN interfaces. An Instance's explicit NSG replaces
+its VPC's NSG. Discovery boot suppresses NSGs but still uses the routing profile.
+Pending network configurations and deleting Instances remain relevant while
+their DPUs serve tenant traffic. Core rejects unsafe policy changes on these
+paths with `FailedPrecondition`, even before duplicate CIDRs exist. Unused
+definitions remain editable. Metadata updates, unchanged stored policy,
+and proven restrictions do not take the overlap transaction lock. `UpdateVpc`
+and `UpdateNetworkSecurityGroup` return `FailedPrecondition` if a VPC or NSG
+used in a policy check changes or is deleted between the initial read and the
+row lock. Both cases invalidate the earlier check.
+
+The [peering and policy checks](https://github.com/dsx-ai-factory/infra-controller/issues/5114)
+do not replace admission for Instance changes
+([#5115](https://github.com/dsx-ai-factory/infra-controller/issues/5115)), startup
+checks, or the complete writer audit
+([#5116](https://github.com/dsx-ai-factory/infra-controller/issues/5116)). Those
+checks must land before the database cutover in
 [#3892](https://github.com/dsx-ai-factory/infra-controller/issues/3892).
 
 Even when the application accepts an eligible pair, the existing `VpcPrefix`
