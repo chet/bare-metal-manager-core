@@ -647,13 +647,13 @@ func (p *Prefix) availablePrefixes() (uint64, []string) {
 		if bits < 0 {
 			continue
 		}
-		// same as: totalAvailable += uint64(math.Pow(float64(2), float64(maxBits-pfx.Bits)))
-		totalAvailable += 1 << bits
+		// Apply the reporting cap before a large IPv6 count can shift to zero.
+		if bits >= 31 {
+			totalAvailable = math.MaxInt32
+		} else {
+			totalAvailable = min(totalAvailable+(1<<bits), math.MaxInt32)
+		}
 		availablePrefixes = append(availablePrefixes, pfx.String())
-	}
-	// we are not reporting more that 2^31 available prefixes
-	if totalAvailable > math.MaxInt32 {
-		totalAvailable = math.MaxInt32
 	}
 	return totalAvailable, availablePrefixes
 }
