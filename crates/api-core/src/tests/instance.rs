@@ -5325,6 +5325,152 @@ async fn test_allocate_and_update_network_config_instance_state_machine(
 }
 
 #[crate::sqlx_test]
+async fn test_slaac_network_update_locks_instance_before_releasing_segment(pool: PgPool) {
+    let fixture = create_auto_vpc_selection_fixture_with_slaac(pool, true).await;
+    let env = &fixture.env;
+    let old_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        env,
+        fixture.vpc_id,
+        "old SLAAC prefix",
+        "fd42:6455:1::/63".parse().unwrap(),
+    )
+    .await;
+    let new_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        env,
+        fixture.vpc_id,
+        "new SLAAC prefix",
+        "fd42:6455:2::/63".parse().unwrap(),
+    )
+    .await;
+    let mh = create_managed_host(env).await;
+    let tinstance = mh
+        .instance_builer(env)
+        .tenant_org(FIXTURE_TENANT_ORG_ID)
+        .network(single_interface_network_config_with_vpc_prefix(
+            old_prefix_id,
+        ))
+        .build()
+        .await;
+    let instance = tinstance.rpc_instance().await;
+    let old_segment_id = instance.config().network().interfaces[0]
+        .network_segment_id
+        .unwrap();
+    let mut config = instance.config().inner().clone();
+    config.network = Some(single_interface_network_config_with_vpc_prefix(
+        new_prefix_id,
+    ));
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(tinstance.id),
+            config: Some(config),
+            metadata: Some(instance.metadata().clone()),
+            if_version_match: None,
+        }))
+        .await
+        .unwrap();
+
+    env.run_network_segment_controller_iteration().await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        10,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::NetworkConfigUpdate {
+                network_config_update_state: NetworkConfigUpdateState::WaitingForConfigSynced,
+            },
+        },
+    )
+    .await;
+    mh.network_configured(env).await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &mh.host().id,
+        10,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::NetworkConfigUpdate {
+                network_config_update_state: NetworkConfigUpdateState::ReleaseOldResources,
+            },
+        },
+    )
+    .await;
+
+    // SLAAC keeps its generated segment without creating address rows that
+    // could serialize cleanup with force deletion.
+    let mut txn = env.db_txn().await;
+    let pending = tinstance.db_instance(&mut txn).await;
+    let request = pending.update_network_config_request.as_ref().unwrap();
+    assert!(request.old_config.interfaces[0].ip_addrs.is_empty());
+    assert!(
+        !request.old_config.interfaces[0]
+            .interface_prefixes
+            .is_empty()
+    );
+    let address_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM instance_addresses WHERE instance_id = $1")
+            .bind(tinstance.id)
+            .fetch_one(txn.as_mut())
+            .await
+            .unwrap();
+    assert_eq!(address_count, 0);
+    txn.rollback().await.unwrap();
+
+    // Force deletion locks the Instance before its generated segments. While
+    // cleanup waits for that Instance, it must leave the old segment unlocked.
+    let mut instance_lock = env.db_txn().await;
+    db::instance::find_by_id_for_update(instance_lock.as_mut(), tinstance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(instance_lock.as_mut())
+        .await
+        .unwrap();
+    let probe_segment_lock = async move {
+        wait_until_query_blocked_by(
+            &env.pool,
+            blocker_pid,
+            "UPDATE instances SET update_network_config_request=NULL",
+        )
+        .await;
+        let result = sqlx::query_scalar::<_, NetworkSegmentId>(
+            "SELECT id FROM network_segments WHERE id = $1 FOR UPDATE NOWAIT",
+        )
+        .bind(old_segment_id)
+        .fetch_one(instance_lock.as_mut())
+        .await;
+        // Release the Instance even when the probe fails so the controller
+        // can finish before we report the assertion.
+        instance_lock.rollback().await.unwrap();
+        result
+    };
+    let ((), segment_lock) = tokio::join!(
+        env.run_machine_state_controller_iteration(),
+        probe_segment_lock,
+    );
+    segment_lock.expect("cleanup must lock the Instance before its generated segment");
+
+    let mut txn = env.db_txn().await;
+    let persisted = tinstance.db_instance(&mut txn).await;
+    assert!(persisted.update_network_config_request.is_none());
+    let segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(IdColumn, &old_segment_id),
+        NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap();
+    let [old_segment] = segments.as_slice() else {
+        panic!("expected the released SLAAC segment");
+    };
+    assert!(old_segment.is_marked_as_deleted());
+    assert!(matches!(
+        mh.host().db_machine(&mut txn).await.current_state(),
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        }
+    ));
+    txn.rollback().await.unwrap();
+}
+
+#[crate::sqlx_test]
 async fn test_allocate_instance_with_multiple_fnn_vpc_prefixes(
     _: PgPoolOptions,
     options: PgConnectOptions,
