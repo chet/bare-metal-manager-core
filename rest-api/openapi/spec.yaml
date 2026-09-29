@@ -3284,7 +3284,7 @@ paths:
                     message: Another power operation is already in progress for the VPC
                     data: null
         '412':
-          description: Deletion was rejected because certain preconditions were not satisfied.
+          description: Deletion was rejected because a Site precondition was not satisfied. Core cannot delete the VPC while it still has peerings, including peerings in Deleting. Delete the peerings and wait for them to disappear, then retry. The VPC's REST status is unchanged when Core rejects the request.
           $ref: '#/components/responses/GenericHttpError'
         '500':
           description: The request failed because of an unexpected database, workflow, or Site communication error, including a workflow timeout.
@@ -3293,6 +3293,8 @@ paths:
         Delete a specific VPC by ID.
 
         Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Delete those dependent resources first.
+
+        First delete all VPC peerings involving this VPC. Wait until each peering's GET endpoint returns `404`; a peering in `Deleting` still prevents VPC deletion. REST returns `412` when Core reports that a peering remains.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
@@ -3827,21 +3829,47 @@ paths:
         - VPC Peering
       operationId: delete-vpc-peering
       description: |-
-        Delete a VPC peering by ID.
+        Request deletion of a VPC peering by ID.
+
+        The peering remains visible with status `Deleting` while Core waits for affected DPUs to apply the removal of peering permissions. Poll this peering's GET endpoint until it returns `404` before deleting either VPC. REST removes the record after Site inventory confirms the peering is gone, so completion can take longer than the DPU update.
+
+        Repeating DELETE while the REST record still exists returns `202` if Core accepts the request or has already removed the peering. Once the REST record is gone, DELETE returns `404`.
+
+        A Site precondition failure returns `412` and leaves the peering's REST status unchanged. This can happen when a concurrent network update prevents deletion from being accepted. Retry the request; contact support if it continues to fail.
 
         Tenant Admin can delete only peerings where both VPCs belong to their tenant.
         Provider Admin can delete only multi-tenant peerings in sites they provide.
 
         User must have authorization role with `TENANT_ADMIN` or `PROVIDER_ADMIN` suffix.
       responses:
-        '204':
-          description: No Content
+        '202':
+          description: Deletion request was accepted. The peering remains in Deleting until Site inventory confirms removal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                accepted:
+                  value:
+                    message: Deletion request was accepted
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site rejected deletion because a precondition was not satisfied. The peering's REST status is unchanged. Retry the request; contact support if it continues to fail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                precondition-failed:
+                  value:
+                    source: nico
+                    message: Site rejected VPC Peering deletion because a precondition was not satisfied. Retry the request; contact support if it continues to fail.
+                    data: null
   '/v2/org/{org}/nico/vpc-prefix':
     parameters:
       - schema:
@@ -21968,7 +21996,7 @@ components:
     VpcPeeringStatus:
       title: VpcPeeringStatus
       type: string
-      description: Status values for VPC peering objects
+      description: Status values for VPC peering objects. Deleting means removal is pending; wait until the peering's GET endpoint returns 404 before deleting either VPC.
       enum:
         - Pending
         - Configuring
