@@ -2525,7 +2525,9 @@ message VpcPeering {
 
 enum VpcPeeringState {
   VPC_PEERING_STATE_UNSPECIFIED = 0;
-  // The peering is active. Creation remains synchronous.
+  // Deletion has not been requested. Peer permissions are included in DPU
+  // configurations only when enabled by the site's peering activation policy.
+  // Creation does not request or wait for a DPU acknowledgement.
   VPC_PEERING_STATE_READY = 1;
   // Peer permissions are omitted from new DPU configurations. The peering
   // remains reserved until every affected DPU acknowledges their removal.
@@ -2542,6 +2544,9 @@ message VpcPeeringList {
 }
 
 message VpcPeeringCreationRequest {
+  // A retained peering with the same endpoint pair or ID returns
+  // FAILED_PRECONDITION, including while that peering is Deleting. Wait for
+  // deletion to finish before creating a replacement.
   // ETV and FNN VPCs are incompatible. Requests that pair them return
   // INVALID_ARGUMENT regardless of the configured VPC peering policy.
   common.VpcId vpc_id = 1;
@@ -2562,6 +2567,9 @@ message VpcPeeringsByIdsRequest {
 message VpcPeeringDeletionRequest {
   // Repeated requests while Deleting succeed without requesting another update.
   // A missing peering returns NOT_FOUND.
+  // A receiver that changes or disappears during the initial network update
+  // returns FAILED_PRECONDITION with retry guidance. The deletion request and
+  // every tentative host update roll back; retry the request.
   common.VpcPeeringId id = 1;
 }
 

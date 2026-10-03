@@ -773,7 +773,9 @@ type VpcPeeringState int32
 
 const (
 	VpcPeeringState_VPC_PEERING_STATE_UNSPECIFIED VpcPeeringState = 0
-	// The peering is active. Creation remains synchronous.
+	// Deletion has not been requested. Peer permissions are included in DPU
+	// configurations only when enabled by the site's peering activation policy.
+	// Creation does not request or wait for a DPU acknowledgement.
 	VpcPeeringState_VPC_PEERING_STATE_READY VpcPeeringState = 1
 	// Peer permissions are omitted from new DPU configurations. The peering
 	// remains reserved until every affected DPU acknowledges their removal.
@@ -13751,6 +13753,9 @@ func (x *VpcPeeringList) GetVpcPeerings() []*VpcPeering {
 
 type VpcPeeringCreationRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// A retained peering with the same endpoint pair or ID returns
+	// FAILED_PRECONDITION, including while that peering is Deleting. Wait for
+	// deletion to finish before creating a replacement.
 	// ETV and FNN VPCs are incompatible. Requests that pair them return
 	// INVALID_ARGUMENT regardless of the configured VPC peering policy.
 	VpcId     *VpcId `protobuf:"bytes,1,opt,name=vpc_id,json=vpcId,proto3" json:"vpc_id,omitempty"`
@@ -13904,6 +13909,9 @@ type VpcPeeringDeletionRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Repeated requests while Deleting succeed without requesting another update.
 	// A missing peering returns NOT_FOUND.
+	// A receiver that changes or disappears during the initial network update
+	// returns FAILED_PRECONDITION with retry guidance. The deletion request and
+	// every tentative host update roll back; retry the request.
 	Id            *VpcPeeringId `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
