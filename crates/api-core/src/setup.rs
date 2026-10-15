@@ -2405,6 +2405,11 @@ async fn initialize_and_start_controllers<'a>(
         // only way the value gets in, sparing a constructor parameter
         // through `SiteExplorer::new` and every test fixture.
         config.retained_boot_interface_window = carbide_config.retained_boot_interface_window;
+        config.admin_fnn_enabled = carbide_config
+            .fnn
+            .as_ref()
+            .and_then(|fnn| fnn.admin_vpc.as_ref())
+            .is_some_and(|admin| admin.enabled);
         if let Some(window) = config.retained_boot_interface_window {
             tracing::info!(
                 window_seconds = window.num_seconds(),

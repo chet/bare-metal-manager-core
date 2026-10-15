@@ -1190,6 +1190,7 @@ dependencies = [
  "carbide-redfish",
  "carbide-resource-pool",
  "carbide-rpc",
+ "carbide-rpc-utils",
  "carbide-secrets",
  "carbide-site-explorer",
  "carbide-spdm-controller",
