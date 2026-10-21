@@ -20,6 +20,7 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/grpc/client"
 	"github.com/prometheus/client_golang/prometheus"
@@ -33,12 +34,39 @@ import (
 // testRPCStatus exercises manager configuration, real RPC completion, and HTTP
 // reporting together; no test calls UpdateGrpcClientState to simulate wiring.
 func testRPCStatus(t *testing.T) {
+	const metricsNamespace = "custom_site_agent"
+
 	oldRegisterer, oldGatherer := prometheus.DefaultRegisterer, prometheus.DefaultGatherer
 	registry := prometheus.NewRegistry()
 	prometheus.DefaultRegisterer, prometheus.DefaultGatherer = registry, registry
 	t.Cleanup(func() {
 		prometheus.DefaultRegisterer, prometheus.DefaultGatherer = oldRegisterer, oldGatherer
 	})
+	checkHealthMetrics := func(t *testing.T, namespace string, health computils.CompStatus) {
+		t.Helper()
+		response := httptest.NewRecorder()
+		newMetricsServeMux().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		for _, metric := range []struct {
+			name string
+			kind string
+			help string
+		}{
+			{
+				name: "health_status", kind: "counter",
+				help: "health status of the Site Agent",
+			},
+			{
+				name: "health", kind: "gauge",
+				help: "Current aggregate health of the Site Agent: 0 unhealthy, 1 healthy",
+			},
+		} {
+			name := namespace + "_" + metric.name
+			assert.Contains(t, response.Body.String(), fmt.Sprintf("# HELP %s %s\n", name, metric.help))
+			assert.Contains(t, response.Body.String(), fmt.Sprintf("# TYPE %s %s\n", name, metric.kind))
+			assert.Contains(t, response.Body.String(), fmt.Sprintf("\n%s %d\n", name, health))
+		}
+	}
 	var responseCode atomic.Uint32
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -57,7 +85,7 @@ func testRPCStatus(t *testing.T) {
 	elektra := elektratypes.NewElektraTypes()
 	elektra.Conf.FlowGrpc.Enabled = true
 	elektra.Conf.DisableBootstrap = true
-	elektra.Conf.MetricsNamespace = "nico_rest_site_agent"
+	elektra.Conf.MetricsNamespace = conftypes.DefaultMetricsNamespace
 	// Insecure clients do not parse certificates, but manager startup hashes them.
 	certPath := filepath.Join(t.TempDir(), "certificate")
 	require.NoError(t, os.WriteFile(certPath, []byte("test certificate hash input"), 0600))
@@ -69,6 +97,13 @@ func testRPCStatus(t *testing.T) {
 	elektra.Conf.FlowGrpc.ServerCAPath = certPath
 	manager, err := NewInstance(elektra)
 	require.NoError(t, err)
+	t.Run("default namespace registration", func(t *testing.T) {
+		manager.Init()
+		checkHealthMetrics(t, conftypes.DefaultMetricsNamespace, computils.CompUnhealthy)
+	})
+	registry = prometheus.NewRegistry()
+	prometheus.DefaultRegisterer, prometheus.DefaultGatherer = registry, registry
+	elektra.Conf.MetricsNamespace = metricsNamespace
 	manager.Init()
 	elektra.Managers.Workflow.State.HealthStatus.Store(uint64(computils.CompHealthy))
 	require.NoError(t, manager.API.CoreGrpc.CreateGrpcClient())
@@ -154,13 +189,11 @@ func testRPCStatus(t *testing.T) {
 					assert.Equal(t, failed, section.RequestsFailed)
 					assert.Equal(t, step.health, section.Health)
 					assert.Equal(t, step.health, status.Health)
-					metrics := httptest.NewRecorder()
-					newMetricsServeMux().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 					health := computils.CompHealthy
 					if step.health == "Unhealthy" {
 						health = computils.CompUnhealthy
 					}
-					assert.Contains(t, metrics.Body.String(), fmt.Sprintf("\nnico_rest_site_agent_health_status %d\n", health))
+					checkHealthMetrics(t, metricsNamespace, health)
 				})
 			}
 			t.Run("concurrent calls and status reads", func(t *testing.T) {

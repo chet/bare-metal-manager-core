@@ -785,6 +785,15 @@ The site agent bootstrap flow is:
 
 The StatefulSet probes the agent on port `8080`. The agent checks Temporal and Core gRPC every `30s`, and Flow gRPC too when `FLOW_GRPC_ENABLED` is `true`. `/readyz` reports the latest results, so it succeeds only while its Temporal worker runs and every checked dependency is reachable. The same results back the `nico_rest_site_agent_temporal_connection_status`, `nico_rest_site_agent_carbide_health_status`, `nico_rest_site_agent_flow_grpc_health_status`, and `nico_rest_site_agent_health_status` metrics. `/healthz` fails once a Temporal connection attempt fails or the Temporal SDK stops the worker, and passes while an attempt is still in progress. It also fails once `site-registration` holds a `site-uuid` or `otp` the agent did not apply itself, as after a re-pair, because the agent reads that secret only at startup. Either way Kubernetes restarts the agent after three failed liveness probes, whether or not it is Ready. Until a site is configured below, the agent is not Ready and restarts after each failed connection attempt. So its pod shows `CrashLoopBackOff` between those restarts.
 
+Use the following gauges for health queries and alerts. Their values can increase or decrease as health changes. The existing counter families remain available for compatibility:
+
+| Health | Gauge | Retained Counter |
+|---|---|---|
+| Aggregate Site Agent health: `0` unhealthy, `1` healthy | `nico_rest_site_agent_health` | `nico_rest_site_agent_health_status` |
+| Temporal connection health: `0` unhealthy, `1` healthy, `2` not known | `nico_rest_site_agent_temporal_connection_health` | `nico_rest_site_agent_temporal_connection_status` |
+
+These names use the default `nico_rest_site_agent` namespace. A configured metrics namespace replaces that prefix in both the gauge and retained counter names. Temporal exposes the stored component status, including the shared `2` encoding for an unknown status.
+
 Each agent pod also reports its own bootstrap, Temporal, and Core gRPC state as JSON at `/status`. [Check a Site Agent pod](../../docs/playbooks/stuck_objects/site_controller_health.md#check-a-site-agent-pod) shows how to reach one pod and describes each field.
 
 ### Manifests

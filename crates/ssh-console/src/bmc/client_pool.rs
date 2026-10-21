@@ -32,7 +32,7 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
-use crate::bmc::client::{BmcConnectionSubscription, ClientHandle};
+use crate::bmc::client::{BmcConnectionSubscription, BmcRecoveryAttempted, ClientHandle};
 use crate::bmc::client_pool::GetConnectionError::InvalidMachineId;
 use crate::bmc::connection::State;
 use crate::bmc::{client, connection};
@@ -227,6 +227,14 @@ pub(super) struct BmcPoolMetrics {
 
 impl BmcPoolMetrics {
     fn new(meter: &Meter, members: Arc<RwLock<HashMap<MachineId, ClientHandle>>>) -> Self {
+        // Initialize before client creation can hold `members`: a scrape holds
+        // the metrics lock while its callbacks read `members`. This also exposes
+        // zero before any BMC connects.
+        let initialized = carbide_instrument::initialize_counter_series(&BmcRecoveryAttempted);
+        debug_assert!(
+            initialized,
+            "BMC recovery Event must initialize its counter"
+        );
         Self {
             grpc_total_hosts: meter
                 .u64_gauge("ssh_console_grpc_total_machines")
