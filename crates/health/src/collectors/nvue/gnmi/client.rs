@@ -624,6 +624,7 @@ mod tests {
     use std::io;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
+    use std::time::SystemTime;
 
     use carbide_test_support::{Check, check_values};
     use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntGauge};
@@ -651,7 +652,8 @@ mod tests {
     use crate::metrics::MetricsManager;
     use crate::otlp::convert::build_metrics_export_request;
     use crate::sink::{
-        CollectorEvent, CompositeDataSink, DataSink, EventContext, MetricSample, PrometheusSink,
+        CollectorEvent, CompositeDataSink, DataSink, EventContext, MetricSample, MetricSemantics,
+        PrometheusSink,
     };
 
     #[test]
@@ -840,6 +842,68 @@ mod tests {
             .unwrap_or_else(|_| {
                 panic!("valid update {marker} must publish for {:?}", self.request)
             });
+        }
+
+        async fn publish_counter(
+            &self,
+            sink: &RecordingMetricSink,
+            value: u64,
+            last_clear: Option<u64>,
+        ) -> MetricSample {
+            self.send(Response::Update(proto::Notification {
+                timestamp: 1_000,
+                update: last_clear
+                    .map(|epoch| ("last-clear", epoch))
+                    .into_iter()
+                    .chain([("in-errors", value)])
+                    .map(|(leaf, value)| proto::Update {
+                        path: Some(Path {
+                            elem: ["interfaces", "interface", "state", "counters", leaf]
+                                .into_iter()
+                                .map(|name| PathElem {
+                                    name: name.into(),
+                                    key: if name == "interface" {
+                                        [("name".into(), "counter-port".into())].into()
+                                    } else {
+                                        Default::default()
+                                    },
+                                })
+                                .collect(),
+                            ..Default::default()
+                        }),
+                        val: Some(proto::TypedValue {
+                            value: Some(proto::typed_value::Value::UintVal(value)),
+                        }),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }))
+            .await;
+
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let sample = sink
+                        .samples
+                        .lock()
+                        .expect("recorded metrics")
+                        .iter()
+                        .rev()
+                        .find(|(_, sample)| {
+                            sample.key == "interface_in_errors:counter-port"
+                                && sample.value == value as f64
+                        })
+                        .map(|(_, sample)| sample.clone());
+
+                    if let Some(sample) = sample {
+                        return sample;
+                    }
+
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("counter update must publish")
         }
 
         #[allow(deprecated)]
@@ -1420,6 +1484,12 @@ mod tests {
             for retry in 0..2 {
                 let mut old = streams.remove(stream_index);
 
+                let before = if stream_index == 0 && retry == 0 {
+                    Some(old.publish_counter(sink, 41, Some(100)).await)
+                } else {
+                    None
+                };
+
                 let code = if stream_index == 1 {
                     tonic::Code::Unimplemented
                 } else {
@@ -1452,6 +1522,32 @@ mod tests {
                 replacement
                     .publish(sink, &format!("recovered-{stream_index}-{retry}"))
                     .await;
+
+                if let Some(before) = before {
+                    let after = replacement.publish_counter(sink, 44, None).await;
+                    let relearned = replacement.publish_counter(sink, 47, Some(200)).await;
+
+                    for (sample, value, epoch) in [
+                        (&before, 41.0, Some(100)),
+                        (&after, 44.0, None),
+                        (&relearned, 47.0, Some(200)),
+                    ] {
+                        assert_eq!(sample.value, value);
+                        assert_eq!(sample.key, before.key);
+                        assert_eq!(sample.name, before.name);
+                        assert_eq!(sample.metric_type, before.metric_type);
+                        assert_eq!(sample.unit, before.unit);
+                        assert_eq!(sample.labels, before.labels);
+                        assert_eq!(
+                            sample.semantics,
+                            MetricSemantics::CumulativeCounter {
+                                start_time: epoch.map(|nanos| {
+                                    SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos)
+                                }),
+                            }
+                        );
+                    }
+                }
 
                 streams.insert(stream_index, replacement);
             }
@@ -1711,6 +1807,7 @@ mod tests {
         sink.handle_event(
             &crate::sink::EventContext::from_endpoint(&endpoint, NVUE_GNMI_SAMPLE_STREAM_ID),
             &CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "unrelated-interface".into(),
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.into(),
                 metric_type: "interface_reading".into(),

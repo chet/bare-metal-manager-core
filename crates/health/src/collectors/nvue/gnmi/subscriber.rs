@@ -1167,7 +1167,7 @@ async fn run_gnmi_sample_task<S, F, Fut>(
     config: &GnmiStreamConfig,
     stream_metrics: &GnmiStreamMetrics,
     sample_processor: &GnmiSampleProcessor,
-    subscribe: F,
+    mut subscribe: F,
 ) where
     S: Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Send + Unpin,
     F: FnMut() -> Fut + Send,
@@ -1201,7 +1201,12 @@ async fn run_gnmi_sample_task<S, F, Fut>(
                     .diagnostic_stream
                     .unwrap_or(NVUE_GNMI_SAMPLE_STREAM_ID),
             }),
-        subscribe,
+        || {
+            // A clear can occur while disconnected. Learn source epochs again
+            // from the new stream, including its updates before SyncResponse.
+            sample_processor.clear_counter_epochs();
+            subscribe()
+        },
         |response| {
             sample_processor.process_subscribe_response(response, stream_metrics);
             Ok(false)
@@ -1462,6 +1467,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::SystemTime;
 
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases_async};
@@ -1473,6 +1479,7 @@ mod tests {
     use crate::endpoint::test_support::test_endpoint as test_bmc_endpoint;
     use crate::endpoint::{BmcAddr, BmcCredentials};
     use crate::metrics::MetricsManager;
+    use crate::sink::{MetricSample, MetricSemantics};
 
     type TestStream =
         Pin<Box<dyn Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Send>>;
@@ -2027,6 +2034,30 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn sample_task_retries_when_initial_stream_does_not_synchronize() {
+        #[derive(Default)]
+        struct RecordingSink(StdMutex<Vec<MetricSample>>);
+
+        impl DataSink for RecordingSink {
+            fn sink_type(&self) -> &'static str {
+                "recording-metric"
+            }
+
+            fn try_handle_event(
+                &self,
+                _context: &EventContext,
+                event: &CollectorEvent,
+            ) -> Result<(), HealthError> {
+                if let CollectorEvent::Metric(sample) = event {
+                    self.0
+                        .lock()
+                        .expect("recorded metrics")
+                        .push((**sample).clone());
+                }
+
+                Ok(())
+            }
+        }
+
         let cancel_token = CancellationToken::new();
 
         let client_provider = test_client_provider(RecordingProvider::responding_with(
@@ -2041,18 +2072,88 @@ mod tests {
         };
 
         let metrics = test_gnmi_stream_metrics();
+        let sink = Arc::new(RecordingSink::default());
+        let mut processor = test_sample_processor(None);
+        processor.data_sink = Some(sink.clone());
 
-        let processor = test_sample_processor(None);
+        let counter_update =
+            |value: u64, last_clear: Option<u64>, observed_at: i64| proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::Update(
+                    proto::Notification {
+                        timestamp: observed_at,
+                        prefix: Some(proto::Path {
+                            elem: ["interfaces", "interface", "state", "counters"]
+                                .into_iter()
+                                .map(|name| proto::PathElem {
+                                    name: name.into(),
+                                    key: if name == "interface" {
+                                        [("name".into(), "counter-port".into())].into()
+                                    } else {
+                                        Default::default()
+                                    },
+                                })
+                                .collect(),
+                            ..Default::default()
+                        }),
+                        update: last_clear
+                            .map(|epoch| ("last-clear", epoch))
+                            .into_iter()
+                            .chain([("in-errors", value)])
+                            .map(|(leaf, value)| proto::Update {
+                                path: Some(proto::Path {
+                                    elem: vec![proto::PathElem {
+                                        name: leaf.into(),
+                                        ..Default::default()
+                                    }],
+                                    ..Default::default()
+                                }),
+                                val: Some(proto::TypedValue {
+                                    value: Some(proto::typed_value::Value::UintVal(value)),
+                                }),
+                                ..Default::default()
+                            })
+                            .collect(),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            };
 
         let synchronized = proto::SubscribeResponse {
             response: Some(proto::subscribe_response::Response::SyncResponse(true)),
             ..Default::default()
         };
 
-        let stalled: TestStream = Box::pin(tokio_stream::pending());
+        // The first stream supplies a deletion boundary and a later epoch but
+        // never finishes its initial sync.
+        let stalled: TestStream = Box::pin(
+            tokio_stream::iter([
+                Ok(proto::SubscribeResponse {
+                    response: Some(proto::subscribe_response::Response::Update(
+                        proto::Notification {
+                            timestamp: 3_000,
+                            delete: vec![proto::Path::default()],
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                }),
+                Ok(counter_update(10, Some(100), 4_000)),
+            ])
+            .chain(tokio_stream::pending()),
+        );
 
-        let synchronized: TestStream =
-            Box::pin(tokio_stream::once(Ok(synchronized)).chain(tokio_stream::pending()));
+        // The counter alone must not reuse the epoch. Earlier metadata must
+        // then be accepted, proving the retry also cleared the deletion boundary.
+        let synchronized: TestStream = Box::pin(
+            tokio_stream::iter([
+                Ok(counter_update(13, None, 5_000)),
+                Ok(counter_update(14, Some(200), 2_001)),
+                Ok(synchronized),
+                Ok(counter_update(15, None, 2_002)),
+            ])
+            .chain(tokio_stream::pending()),
+        );
 
         let mut streams = VecDeque::from([stalled, synchronized]);
         let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2068,14 +2169,14 @@ mod tests {
         let observe = async {
             attempt_rx.recv().await.expect("first subscription attempt");
 
-            tokio::task::yield_now().await;
+            wait_for_stream_condition(|| sink.0.lock().expect("recorded metrics").len() == 1).await;
             assert_eq!(metrics.connection_state.get(), READY);
             assert_eq!(metrics.connected.get(), 1);
             assert_eq!(metrics.synchronized.get(), 0);
 
             attempt_rx.recv().await.expect("retry subscription attempt");
 
-            tokio::task::yield_now().await;
+            wait_for_stream_condition(|| sink.0.lock().expect("recorded metrics").len() == 4).await;
             assert_eq!(metrics.connection_state.get(), READY);
             assert_eq!(metrics.connected.get(), 1);
             assert_eq!(metrics.synchronized.get(), 1);
@@ -2089,6 +2190,31 @@ mod tests {
         assert_eq!(metrics.connection_state.get(), SHUTDOWN);
         assert_eq!(metrics.connected.get(), 0);
         assert_eq!(metrics.synchronized.get(), 0);
+
+        let samples = sink.0.lock().expect("recorded metrics");
+        assert_eq!(samples.len(), 4);
+
+        for (sample, (value, epoch)) in samples.iter().zip([
+            (10.0, Some(100)),
+            (13.0, None),
+            (14.0, Some(200)),
+            (15.0, Some(200)),
+        ]) {
+            assert_eq!(sample.value, value);
+            assert_eq!(sample.key, "interface_in_errors:counter-port");
+            assert_eq!(sample.name, NVUE_GNMI_SAMPLE_STREAM_ID);
+            assert_eq!(sample.metric_type, "interface_in_errors");
+            assert_eq!(sample.unit, "count");
+            assert_eq!(sample.labels, samples[0].labels);
+            assert_eq!(
+                sample.semantics,
+                MetricSemantics::CumulativeCounter {
+                    start_time: epoch
+                        .map(|nanos| SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos)),
+                },
+                "counter value {value}"
+            );
+        }
     }
 
     async fn wait_for_stream_condition(condition: impl Fn() -> bool) {

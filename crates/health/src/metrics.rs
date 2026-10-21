@@ -36,6 +36,7 @@ use prometheus::{
 use serde::{Deserialize, Serialize};
 
 use crate::HealthError;
+use crate::sink::MetricSemantics;
 
 pub type MetricLabel = (Cow<'static, str>, String);
 type BoxedErr = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -441,6 +442,7 @@ pub struct GaugeReading {
     pub metric_type: String,
     pub unit: String,
     pub value: f64,
+    semantics: MetricSemantics,
     pub labels: Vec<MetricLabel>,
 }
 
@@ -458,12 +460,18 @@ impl GaugeReading {
             metric_type: metric_type.into(),
             unit: unit.into(),
             value,
+            semantics: MetricSemantics::Gauge,
             labels: Vec::new(),
         }
     }
 
     pub fn with_labels(mut self, labels: Vec<MetricLabel>) -> Self {
         self.labels.extend(labels);
+        self
+    }
+
+    pub(crate) fn with_semantics(mut self, semantics: MetricSemantics) -> Self {
+        self.semantics = semantics;
         self
     }
 }
@@ -473,6 +481,7 @@ struct GaugeData {
     metric_type: String,
     unit: String,
     value: f64,
+    semantics: MetricSemantics,
     labels: Vec<MetricLabel>,
     generation: u64,
 }
@@ -552,6 +561,7 @@ impl GaugeMetrics {
                 metric_type: reading.metric_type,
                 unit: reading.unit,
                 value: reading.value,
+                semantics: reading.semantics,
                 labels: reading.labels,
                 generation,
             },
@@ -603,31 +613,12 @@ impl Collector for GaugeMetrics {
     }
 
     fn collect(&self) -> Vec<proto::MetricFamily> {
-        let mut families: HashMap<(String, String, String), proto::MetricFamily> = HashMap::new();
+        let mut families = HashMap::new();
 
         for gauge_ref in self.gauges.iter() {
             let data = gauge_ref.value();
-            let family_key = (
-                data.name.clone(),
-                data.metric_type.clone(),
-                data.unit.clone(),
-            );
-
-            let family = families.entry(family_key).or_insert_with(|| {
-                let metric_name = format!(
-                    "{}_{}_{}_{}",
-                    self.metric_name_prefix, data.name, data.metric_type, data.unit
-                );
-                let mut mf = proto::MetricFamily::default();
-                mf.set_name(metric_name);
-                mf.set_help(self.metric_help.clone());
-                mf.set_field_type(proto::MetricType::GAUGE);
-                mf
-            });
-
             let mut labels = Vec::with_capacity(self.static_labels.len() + data.labels.len());
             labels.extend_from_slice(&self.static_labels);
-
             for (name, value) in &data.labels {
                 let mut label = proto::LabelPair::new();
                 label.set_name(name.as_ref().to_owned());
@@ -635,14 +626,49 @@ impl Collector for GaugeMetrics {
                 labels.push(label);
             }
 
-            let mut gauge = proto::Gauge::new();
-            gauge.set_value(data.value);
+            // Both names come from one retained reading, so replacement and
+            // pruning cannot leave the compatibility gauge behind the counter.
+            let counter_labels = data
+                .semantics
+                .exports_counter(data.value)
+                .then(|| labels.clone());
+            for (kind, labels) in std::iter::once((proto::MetricType::GAUGE, labels))
+                .chain(counter_labels.map(|labels| (proto::MetricType::COUNTER, labels)))
+            {
+                let family_key = (
+                    data.name.clone(),
+                    data.metric_type.clone(),
+                    data.unit.clone(),
+                    kind,
+                );
+                let family = families.entry(family_key).or_insert_with(|| {
+                    let mut name = format!(
+                        "{}_{}_{}_{}",
+                        self.metric_name_prefix, data.name, data.metric_type, data.unit
+                    );
+                    if kind == proto::MetricType::COUNTER {
+                        name.push_str("_total");
+                    }
+                    let mut family = proto::MetricFamily::default();
+                    family.set_name(name);
+                    family.set_help(self.metric_help.clone());
+                    family.set_field_type(kind);
+                    family
+                });
 
-            let mut metric = proto::Metric::new();
-            metric.set_label(labels);
-            metric.set_gauge(gauge);
-
-            family.mut_metric().push(metric);
+                let mut metric = proto::Metric::new();
+                metric.set_label(labels);
+                if kind == proto::MetricType::COUNTER {
+                    let mut counter = proto::Counter::new();
+                    counter.set_value(data.value);
+                    metric.set_counter(counter);
+                } else {
+                    let mut gauge = proto::Gauge::new();
+                    gauge.set_value(data.value);
+                    metric.set_gauge(gauge);
+                }
+                family.mut_metric().push(metric);
+            }
         }
 
         families.into_values().collect()
@@ -887,6 +913,50 @@ mod tests {
         collector
             .create_gauge_metrics("endpoint_a".to_string(), "Sensor readings", Vec::new())
             .expect("removed gauge identity must register again");
+    }
+
+    #[test]
+    fn invalid_counter_readings_keep_the_gauge_and_remove_the_counter() {
+        let exported_value = |value| {
+            let registry = Registry::new();
+            let readings = GaugeMetrics::new(
+                "device".to_string(),
+                &registry,
+                "custom",
+                "Device readings",
+                Vec::<(String, String)>::new(),
+            )
+            .expect("reading collector");
+            let reading = |value| {
+                GaugeReading::new("device", "hardware", "errors", "count", value)
+                    .with_semantics(MetricSemantics::CumulativeCounter { start_time: None })
+            };
+            readings.record(reading(10.0));
+            assert_eq!(registry.gather().len(), 2, "initial aliases");
+
+            readings.record(reading(value));
+            let families = registry.gather();
+            assert_eq!(families.len(), 1, "invalid counter alias is absent");
+            assert_eq!(families[0].name(), "custom_hardware_errors_count");
+            assert_eq!(families[0].get_field_type(), proto::MetricType::GAUGE);
+            families[0].get_metric()[0].get_gauge().value().to_bits()
+        };
+
+        check_values(
+            [
+                Check {
+                    scenario: "negative total",
+                    input: -1.0,
+                    expect: (-1.0_f64).to_bits(),
+                },
+                Check {
+                    scenario: "nonfinite total",
+                    input: f64::NAN,
+                    expect: f64::NAN.to_bits(),
+                },
+            ],
+            exported_value,
+        );
     }
 
     #[test]

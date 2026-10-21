@@ -366,7 +366,8 @@ impl DataSink for PrometheusSink {
                             sample.unit.clone(),
                             sample.value,
                         )
-                        .with_labels(labels),
+                        .with_labels(labels)
+                        .with_semantics(sample.semantics),
                     );
                 }
                 Err(error) => {
@@ -452,6 +453,7 @@ mod tests {
         };
 
         let sample = CollectorEvent::Metric(Box::new(MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: "temperature".to_string(),
             name: "temperature".to_string(),
             metric_type: "sensor".to_string(),
@@ -560,6 +562,7 @@ mod tests {
             sink.try_handle_event(
                 &context,
                 &CollectorEvent::Metric(Box::new(MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key: "temperature".to_string(),
                     name: "temperature".to_string(),
                     metric_type: "sensor".to_string(),
@@ -785,6 +788,7 @@ mod tests {
         sink.handle_event(
             &context,
             &CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "event:42".to_string(),
                 name: "test_dynamic_labels".to_string(),
                 metric_type: "on_change_row".to_string(),
@@ -828,6 +832,7 @@ mod tests {
 
         for (scenario, names) in collision_cases {
             let sample = CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: scenario.to_string(),
                 name: "test_dynamic_labels".to_string(),
                 metric_type: "on_change_row".to_string(),
@@ -898,6 +903,7 @@ mod tests {
             sink.handle_event(
                 &context,
                 &CollectorEvent::Metric(Box::new(MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key: key.to_string(),
                     name: "nvue_gnmi_extended".to_string(),
                     metric_type: "reading".to_string(),
