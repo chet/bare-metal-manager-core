@@ -45,6 +45,8 @@ pub struct StartArgs {
     pub ready_channel: Sender<carbide::ApiServerReady>,
     pub credential_config: CredentialConfig,
     pub insecure_discovery: bool,
+    /// Enable SPDM in the generated API configuration, including machine attestation paths.
+    pub spdm_enabled: bool,
 }
 
 pub async fn start(
@@ -60,6 +62,7 @@ pub async fn start(
         ready_channel,
         credential_config,
         insecure_discovery,
+        spdm_enabled,
     }: StartArgs,
 ) -> eyre::Result<()> {
     let firmware_directory_str = firmware_directory.to_string_lossy();
@@ -214,6 +217,8 @@ pub async fn start(
         dpu_wait_time = "1s"
         power_down_wait = "1s"
         failure_retry_time = "1s"
+        # Supermicro fixtures reboot after unlock; use the same short wait as other test reboots.
+        uefi_boot_wait = "1s"
         dpu_up_threshold = "31449600s"
 
         [machine_state_controller.controller]
@@ -310,6 +315,20 @@ pub async fn start(
         [measured_boot_collector]
         enabled = true
         run_interval = "10s"
+
+        [spdm]
+        enabled = {spdm_enabled}
+
+        # Keep verifier endpoints local so unexpected attestation attempts cannot
+        # contact an external service.
+        [spdm.nras_config]
+        nras_url = "http://127.0.0.1:9"
+        nras_gpu_url_suffix = "/gpu"
+        nras_jwks_url = "http://127.0.0.1:9/jwks"
+        validate_jwt_expiry = true
+
+        [spdm_state_controller.controller]
+        metric_emission_interval = "1s"
 
         [machine_validation_config]
         enabled = true

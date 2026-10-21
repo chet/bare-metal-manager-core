@@ -24,14 +24,15 @@ use std::time::{self, Duration};
 use ::carbide_utils::HostPortPair;
 use ::machine_a_tron::lifecycle_timings::{LifecycleTimingOverrides, PartialLifecycleTimings};
 use ::machine_a_tron::{
-    BmcMockRegistry, DeviceHandle, DhcpType, LogFormat, MachineATronConfig, MachineConfig,
+    BmcMockRegistry, DeviceHandle, DhcpType, DpuMachineHandle, LogFormat, MachineATronConfig,
+    MachineConfig,
 };
 use api_test_helper::api_server::{TEST_BMC_DHCP_RELAY_ADDRESS, TEST_BMC_NETWORK_PREFIX};
 use api_test_helper::machine_a_tron::MachineATronHandle;
 use api_test_helper::utils::TestApiServerArgs;
 use api_test_helper::{
-    IntegrationTestEnvironment, domain, instance, machine, metrics, scout_stream, subnet, tenant,
-    utils, vpc, vpc_prefix,
+    IntegrationTestEnvironment, domain, instance, machine, measured_boot, metrics, scout_stream,
+    subnet, tenant, utils, vpc, vpc_prefix,
 };
 use bmc_mock::test_support::TEST_MAC_POOL;
 use bmc_mock::{HardwareType, ListenerOrAddress};
@@ -82,10 +83,17 @@ async fn run_integration() -> eyre::Result<()> {
         println!("test_integration: SKIPPED (set REPO_ROOT and DATABASE_URL to run)");
         return Ok(());
     };
+    test_env.spdm_enabled = true;
 
     // Persist a predecessor root without a protection request before either API
     // starts, then verify that the background controller makes it ready.
     db::migrations::migrate(&test_env.db_pool).await?;
+    // SPDM runs for its controller metrics; no policy schedules external verification.
+    assert!(
+        db::attestation_profile::list(&test_env.db_pool)
+            .await?
+            .is_empty()
+    );
     let mut txn = test_env.db_pool.begin().await?;
     let recovery_tenant_id = "site-prefix-recovery";
     db::tenant::create_and_persist(
@@ -481,6 +489,7 @@ async fn run_integration() -> eyre::Result<()> {
             .await?;
         }
     }
+    prepare_metric_alias_catalogue(&test_env).await?;
     // Exercise the library sampler on the server's meter without activating a
     // remote backend. Stop its task before `generate_core_metric_docs`, whose
     // metric fetch and file write can panic on I/O errors.
@@ -502,7 +511,9 @@ async fn run_integration() -> eyre::Result<()> {
         result?;
     }
     cleanup_metric_result?;
-    generate_core_metric_docs(&test_env.carbide_metrics_addrs);
+    let mut metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
+    metric_infos.extend(collect_dhcp_metric_infos().await?);
+    generate_core_metric_docs(metric_infos);
     drop(mqtt_client);
 
     // MaT opens ScoutStream on its primary API address and shares ordinary RPCs across both.
@@ -539,6 +550,156 @@ async fn run_integration() -> eyre::Result<()> {
     test_env.db_pool.close().await;
     bmc_mock_handle.stop().await?;
     Ok(())
+}
+
+/// Seeds measured-boot data and waits for both names before the catalogue scrape.
+async fn prepare_metric_alias_catalogue(test_env: &IntegrationTestEnvironment) -> eyre::Result<()> {
+    use rpc::protos::measured_boot::{
+        CreateMeasurementBundleRequest, CreateMeasurementSystemProfileRequest,
+        MeasurementBundleStatePb, PcrRegisterValuePb,
+    };
+
+    let profile = measured_boot::create_profile(
+        &test_env.carbide_api_addrs,
+        CreateMeasurementSystemProfileRequest {
+            name: Some("metric-catalogue-profile".to_string()),
+            vendor: "metric-catalogue".to_string(),
+            product: "metric-catalogue".to_string(),
+            extra_attrs: Vec::new(),
+        },
+    )
+    .await?;
+    measured_boot::create_bundle(
+        &test_env.carbide_api_addrs,
+        CreateMeasurementBundleRequest {
+            profile_id: profile.profile_id,
+            name: Some("metric-catalogue-bundle".to_string()),
+            pcr_values: vec![PcrRegisterValuePb {
+                pcr_register: 0,
+                sha_any: "aa".to_string(),
+            }],
+            state: MeasurementBundleStatePb::Active.into(),
+        },
+    )
+    .await?;
+
+    // The profile and bundle populate the label-dependent measured-boot families.
+    // The DPU expiry remains available because its fixture leaves the simulator paused.
+    for (legacy, alias) in [
+        ("carbide_preingestion_total", "carbide_preingestion_count"),
+        (
+            "carbide_measured_boot_profiles_total",
+            "carbide_measured_boot_profiles_count",
+        ),
+        (
+            "carbide_measured_boot_bundles_total",
+            "carbide_measured_boot_bundles_count",
+        ),
+        (
+            "carbide_measured_boot_machines_total",
+            "carbide_measured_boot_machines_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_profile_total",
+            "carbide_measured_boot_machines_per_profile_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_bundle_total",
+            "carbide_measured_boot_machines_per_bundle_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_bundle_state_total",
+            "carbide_measured_boot_machines_per_bundle_state_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_machine_state_total",
+            "carbide_measured_boot_machines_per_machine_state_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_pcr_value_total",
+            "carbide_measured_boot_bundles_per_pcr_value_count",
+        ),
+        ("carbide_machines_total", "carbide_machines_count"),
+        (
+            "carbide_network_segments_total",
+            "carbide_network_segments_count",
+        ),
+        ("carbide_vpc_prefixes_total", "carbide_vpc_prefixes_count"),
+        (
+            "carbide_extension_services_total",
+            "carbide_extension_services_count",
+        ),
+        (
+            "carbide_spdm_attestation_total",
+            "carbide_spdm_attestation_count",
+        ),
+        ("carbide_ib_partitions_total", "carbide_ib_partitions_count"),
+        ("carbide_power_shelves_total", "carbide_power_shelves_count"),
+        ("carbide_racks_total", "carbide_racks_count"),
+        ("carbide_switches_total", "carbide_switches_count"),
+        (
+            "carbide_dpu_client_certificate_expiration_time",
+            "carbide_dpu_client_certificate_expiration_time_seconds",
+        ),
+    ] {
+        for name in [legacy, alias] {
+            metrics::wait_for_metric_line(
+                &test_env.carbide_metrics_addrs,
+                &format!("# TYPE {name} gauge\n"),
+            )
+            .await?;
+        }
+    }
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        "# HELP carbide_measured_boot_bundles_per_pcr_value_count Number of measured boot bundles containing a given PCR value at a given PCR index.\n",
+    )
+    .await?;
+    Ok(())
+}
+
+/// Collects DHCP catalogue entries from the real HTTP exporter.
+async fn collect_dhcp_metric_infos() -> eyre::Result<Vec<metrics::MetricInfo>> {
+    use metrics_endpoint::{MetricsEndpointConfig, run_metrics_endpoint_with_listener};
+
+    let expiry = 1_893_456_000;
+    let setup = dhcp::test_support::metrics_setup_with_certificate_expiry(expiry)?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let config = MetricsEndpointConfig {
+        address,
+        registry: setup.registry.clone(),
+        health_controller: None,
+        additional_prefix: None,
+    };
+    let cancel_token = CancellationToken::new();
+    let server_token = cancel_token.clone();
+    let server = tokio::spawn(async move {
+        run_metrics_endpoint_with_listener(&config, server_token, listener).await
+    });
+
+    let scrape_result = metrics::collect_metric_infos(&[address])
+        .and_then(|infos| metrics::metrics(&address).map(|samples| (infos, samples)));
+    cancel_token.cancel();
+    let server_result = server.await.wrap_err("joining the DHCP metrics endpoint")?;
+    // Its provider must retain the callbacks through both HTTP scrapes and shutdown.
+    drop(setup);
+    server_result.wrap_err("serving the DHCP metrics endpoint")?;
+    let (infos, samples) = scrape_result?;
+
+    for name in [
+        "carbide_dhcp_certificate_expiration_time",
+        "carbide_dhcp_certificate_expiration_time_seconds",
+    ] {
+        let info = infos
+            .iter()
+            .find(|info| info.name == name)
+            .with_context(|| format!("DHCP endpoint did not expose {name}"))?;
+        assert_eq!(info.ty, "gauge");
+        assert_eq!(info.help, "The certificate expiration time (epoch seconds)");
+        metrics::assert_metric_line(&samples, &format!("{name} {expiry}\n"));
+    }
+    Ok(infos)
 }
 
 async fn exercise_dpf_exploration_suppression(
@@ -604,8 +765,7 @@ async fn exercise_dpf_exploration_suppression(
     Ok(())
 }
 
-fn generate_core_metric_docs(metrics_endpoints: &[SocketAddr]) {
-    let mut infos = metrics::collect_metric_infos(metrics_endpoints).unwrap();
+fn generate_core_metric_docs(mut infos: Vec<metrics::MetricInfo>) {
     retain_existing_core_metric_infos(&mut infos);
 
     // Delete everything with "alt_metric_" prefix
@@ -790,6 +950,7 @@ async fn run_metrics_integration() -> eyre::Result<()> {
         metrics: _,
         db_url: _,
         credential_config: _,
+        spdm_enabled: _,
         _vault_handle,
     } = test_env.clone();
 
@@ -829,6 +990,9 @@ async fn run_metrics_integration() -> eyre::Result<()> {
                 )
                     .await?;
                 metrics::assert_metric_line(&metrics, r#"carbide_machines_total{fresh="true"} 1"#);
+                for name in ["carbide_spdm_attestation_total", "carbide_spdm_attestation_count"] {
+                    metrics::assert_not_metric_line(&metrics, name);
+                }
                 // Also check that metrics are emitted under the configured `alt_metric_prefix`
                 metrics::assert_metric_line(&metrics, r#"alt_metric_machines_total{fresh="true"} 1"#);
                 metrics::assert_not_metric_line(
@@ -1500,6 +1664,7 @@ async fn test_machine_a_tron_dual_stack(
 /// Tests dual-stack on an FNN L2 segment (shared subnet with SVI/VRR).
 /// The segment is pre-created with both IPv4 and IPv6 prefixes, and the
 /// handler allocates SVI IPs for both. Instances get one IP per prefix.
+/// After release, leaves the DPU paused with an expiry observation for the metric catalogue.
 async fn test_machine_a_tron_dual_stack_l2(
     hw_type: HardwareType,
     test_env: &IntegrationTestEnvironment,
@@ -1562,11 +1727,60 @@ async fn test_machine_a_tron_dual_stack_l2(
                     machine_id = %machine_id,
                     "Machine back to Ready after dual-stack L2 release",
                 );
+                prepare_dpu_certificate_expiry(&machine_handle.dpus()[0], test_env).await?;
                 Ok::<(), eyre::Report>(())
             }
         },
     )
     .await
+}
+
+/// Keeps a DPU expiry observable through catalogue collection, leaving its simulator paused.
+async fn prepare_dpu_certificate_expiry(
+    dpu: &DpuMachineHandle,
+    test_env: &IntegrationTestEnvironment,
+) -> eyre::Result<()> {
+    // MaT reports no expiry; pause it so later reports cannot replace the persisted timestamp.
+    dpu.pause()?;
+    // The waiter runs on the same actor queue as pause, so its return acknowledges the pause.
+    dpu.wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
+        .await?;
+    let dpu_id: carbide_uuid::machine::DpuMachineId = dpu
+        .observed_machine_id()
+        .context("ready DPU has no observed machine ID")?
+        .try_into()?;
+    let mut txn = test_env.db_pool.begin().await?;
+    let mut observation = db::machine::find_one(
+        &mut *txn,
+        &dpu_id,
+        model::machine::machine_search_config::MachineSearchConfig {
+            include_dpus: true,
+            for_update: true,
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("ready DPU is absent from the database")?
+    .network_status_observation
+    .context("ready DPU has no network observation")?;
+    let expiry = 1_893_456_000;
+    observation.client_certificate_expiry = Some(expiry);
+    assert_eq!(
+        db::machine::update_network_status_observation(&mut txn, &dpu_id, &observation).await?,
+        db::ConditionalWrite::Applied(()),
+    );
+    txn.commit().await?;
+    for name in [
+        "carbide_dpu_client_certificate_expiration_time",
+        "carbide_dpu_client_certificate_expiration_time_seconds",
+    ] {
+        metrics::wait_for_metric_line(
+            &test_env.carbide_metrics_addrs,
+            &format!("{name}{{dpu_machine_id=\"{dpu_id}\",fresh=\"true\"}} {expiry}"),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn test_machine_a_tron_scout_stream(

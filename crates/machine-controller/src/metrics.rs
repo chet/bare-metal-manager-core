@@ -420,14 +420,18 @@ impl MetricsEmitter for MachineMetricsEmitter {
                 .build()
         };
 
-        {
+        // Preserve the unsuffixed legacy name for existing queries; both names
+        // report the certificate expiration timestamp in epoch seconds.
+        for name in [
+            "carbide_dpu_client_certificate_expiration_time",
+            "carbide_dpu_client_certificate_expiration_time_seconds",
+        ] {
             let metrics = shared_metrics.clone();
             meter
-                .i64_observable_gauge("carbide_dpu_client_certificate_expiration_time")
+                .i64_observable_gauge(name)
                 .with_description("The expiration time (epoch seconds) for the client certificate associated with a given DPU.")
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
-                        // Placeholder that is replaced in the loop in order not having to reallocate the Vec each time
                         for (id, time) in &metrics.client_certificate_expiration_times {
                             observer.observe(
                                 *time,
@@ -438,8 +442,8 @@ impl MetricsEmitter for MachineMetricsEmitter {
                         }
                     })
                 })
-                .build()
-        };
+                .build();
+        }
 
         let machine_reboot_attempts_in_booting_with_discovery_image = meter
             .u64_histogram("carbide_reboot_attempts_in_booting_with_discovery_image")
@@ -639,7 +643,38 @@ impl MetricsEmitter for MachineMetricsEmitter {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use carbide_utils::test_support::test_meter::TestMeter;
+
     use super::*;
+
+    #[test]
+    fn certificate_expiration_alias_preserves_labels_and_values() {
+        let meter = TestMeter::default();
+        let metrics = SharedMetricsHolder::with_fresh_period(Duration::MAX);
+        MachineMetricsEmitter::new("carbide_machines", &meter.meter(), metrics.clone());
+
+        for expiration in [1740173562, 1750000000] {
+            metrics.update(MachineStateControllerIterationMetrics {
+                client_certificate_expiration_times: HashMap::from([(
+                    "dpu-1".to_string(),
+                    expiration,
+                )]),
+                ..Default::default()
+            });
+            let exported = meter.export_metrics();
+            for name in [
+                "carbide_dpu_client_certificate_expiration_time",
+                "carbide_dpu_client_certificate_expiration_time_seconds",
+            ] {
+                assert!(exported.contains(&format!("# TYPE {name} gauge\n")));
+                assert!(exported.contains(&format!(
+                    "\n{name}{{dpu_machine_id=\"dpu-1\",fresh=\"true\"}} {expiration}\n"
+                )));
+            }
+        }
+    }
 
     #[test]
     fn merge_machine_metrics() {

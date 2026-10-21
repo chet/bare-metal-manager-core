@@ -81,10 +81,14 @@ fn hydrate_meter(
     meter: Meter,
     shared_metrics: SharedMetricsHolder<MeasuredBootMetricsCollectorMetrics>,
 ) {
-    {
+    // Current counts use _count; keep the original _total names for compatible queries.
+    for name in [
+        "carbide_measured_boot_profiles_total",
+        "carbide_measured_boot_profiles_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_profiles_total")
+            .u64_observable_gauge(name)
             .with_description("Number of measured boot profiles.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -94,10 +98,13 @@ fn hydrate_meter(
             .build();
     }
 
-    {
+    for name in [
+        "carbide_measured_boot_bundles_total",
+        "carbide_measured_boot_bundles_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_bundles_total")
+            .u64_observable_gauge(name)
             .with_description("Number of measured boot bundles.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -107,10 +114,13 @@ fn hydrate_meter(
             .build();
     }
 
-    {
+    for name in [
+        "carbide_measured_boot_machines_total",
+        "carbide_measured_boot_machines_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_machines_total")
+            .u64_observable_gauge(name)
             .with_description("Number of machines reporting measurements.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -120,10 +130,13 @@ fn hydrate_meter(
             .build();
     }
 
-    {
+    for name in [
+        "carbide_measured_boot_machines_per_profile_total",
+        "carbide_measured_boot_machines_per_profile_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_machines_per_profile_total")
+            .u64_observable_gauge(name)
             .with_description("Number of machines per measured boot system profile.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -142,10 +155,13 @@ fn hydrate_meter(
             .build();
     }
 
-    {
+    for name in [
+        "carbide_measured_boot_machines_per_bundle_total",
+        "carbide_measured_boot_machines_per_bundle_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_machines_per_bundle_total")
+            .u64_observable_gauge(name)
             .with_description("Number of machines per measured boot bundle.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -160,10 +176,13 @@ fn hydrate_meter(
             .build();
     }
 
-    {
+    for name in [
+        "carbide_measured_boot_machines_per_bundle_state_total",
+        "carbide_measured_boot_machines_per_bundle_state_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_machines_per_bundle_state_total")
+            .u64_observable_gauge(name)
             .with_description("Number of machines per measured boot bundle state.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -182,10 +201,13 @@ fn hydrate_meter(
             .build();
     }
 
-    {
+    for name in [
+        "carbide_measured_boot_machines_per_machine_state_total",
+        "carbide_measured_boot_machines_per_machine_state_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_machines_per_machine_state_total")
+            .u64_observable_gauge(name)
             .with_description("Number of machines per measured boot machine state.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -204,11 +226,20 @@ fn hydrate_meter(
             .build();
     }
 
-    {
-        let metrics = shared_metrics;
+    for (name, description) in [
+        (
+            "carbide_measured_boot_machines_per_pcr_value_total",
+            "Number of machines with a given PCR value at a given PCR index.",
+        ),
+        (
+            "carbide_measured_boot_bundles_per_pcr_value_count",
+            "Number of measured boot bundles containing a given PCR value at a given PCR index.",
+        ),
+    ] {
+        let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_machines_per_pcr_value_total")
-            .with_description("Number of machines with a given PCR value at a given PCR index.")
+            .u64_observable_gauge(name)
+            .with_description(description)
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     for (pcr_register, total) in metrics.num_machines_per_pcr_value.iter() {

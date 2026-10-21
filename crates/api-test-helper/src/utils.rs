@@ -75,6 +75,8 @@ pub struct IntegrationTestEnvironment {
     pub db_pool: Pool<Postgres>,
     pub metrics: MetricsSetup,
     pub credential_config: CredentialConfig,
+    /// Enable SPDM in each generated API configuration, including machine attestation paths.
+    pub spdm_enabled: bool,
     pub _vault_handle: Arc<Vault>,
 }
 
@@ -131,6 +133,7 @@ impl IntegrationTestEnvironment {
             root_dir,
             carbide_metrics_addrs,
             credential_config,
+            spdm_enabled: false,
             db_url,
             db_pool,
             metrics: {
@@ -215,6 +218,7 @@ pub async fn start_api_server(
     let db_url = test_env.db_url.clone();
     let root_dir = test_env.root_dir.clone();
     let credential_config = test_env.credential_config.clone();
+    let spdm_enabled = test_env.spdm_enabled;
 
     // SAFETY: Initial lint enablement: these test settings are installed before the API
     // server task is spawned, but callers already run in multi-threaded test processes.
@@ -270,6 +274,7 @@ pub async fn start_api_server(
                 ready_channel: ready_tx,
                 credential_config,
                 insecure_discovery,
+                spdm_enabled,
             })
             .await
             .inspect_err(|e| {

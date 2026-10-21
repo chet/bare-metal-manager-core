@@ -68,6 +68,12 @@ pub mod mock_api_server;
 mod tls;
 mod tracing_setup;
 
+/// Fixtures for exercising DHCP metrics without starting the Kea hook.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    pub use crate::metrics::metrics_setup_with_certificate_expiry;
+}
+
 static CONFIG: Lazy<RwLock<CarbideDhcpContext>> =
     Lazy::new(|| RwLock::new(CarbideDhcpContext::default()));
 

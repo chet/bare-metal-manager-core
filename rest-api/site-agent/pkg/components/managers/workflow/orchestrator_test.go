@@ -61,6 +61,7 @@ func TestWorkflowOrchestrator(t *testing.T) {
 		omitLeaf     bool
 		invalidKey   bool
 		nilGauge     bool
+		namespace    string
 	}{
 		{name: "master loads existing client certificate", master: true},
 		{name: "non-master loads existing client certificate"},
@@ -69,6 +70,7 @@ func TestWorkflowOrchestrator(t *testing.T) {
 		{name: "failed reload retains previous expiration", failedReload: true},
 		{name: "invalid key leaves metric unchanged", invalidKey: true},
 		{name: "missing gauge does not interrupt certificate loading", nilGauge: true},
+		{name: "certificate aliases honor namespace override", namespace: "acme_site_agent"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -77,10 +79,12 @@ func TestWorkflowOrchestrator(t *testing.T) {
 			}
 			previousAccess := ManagerAccess
 			previousGauge := CertExpirationMetric
+			previousSecondsGauge := certExpirationSecondsMetric
 			previousRegisterer := prometheus.DefaultRegisterer
 			t.Cleanup(func() {
 				ManagerAccess = previousAccess
 				CertExpirationMetric = previousGauge
+				certExpirationSecondsMetric = previousSecondsGauge
 				prometheus.DefaultRegisterer = previousRegisterer
 			})
 
@@ -95,18 +99,23 @@ func TestWorkflowOrchestrator(t *testing.T) {
 					TemporalCertPath: t.TempDir(),
 				},
 			}
+			if tt.namespace != "" {
+				conf.MetricsNamespace = tt.namespace
+			}
 			data := &elektratypes.Elektra{Log: zerolog.Nop(), Managers: managertypes.NewManagerType()}
 			managerConf := &managerapi.ManagerConf{EB: conf}
 			NewWorkflowManager(data, nil, managerConf).Init()
-			gauge := CertExpirationMetric
-			gaugeValue := func() float64 {
+			expirationGauges := []prometheus.Gauge{CertExpirationMetric, certExpirationSecondsMetric}
+			assertExpirationValues := func(want float64) {
 				t.Helper()
-				metric := &dto.Metric{}
-				writeErr := gauge.Write(metric)
-				require.NoError(t, writeErr)
-				return metric.GetGauge().GetValue()
+				for _, gauge := range expirationGauges {
+					metric := &dto.Metric{}
+					writeErr := gauge.Write(metric)
+					require.NoError(t, writeErr)
+					assert.Equal(t, want, metric.GetGauge().GetValue())
+				}
 			}
-			require.Zero(t, gaugeValue())
+			assertExpirationValues(0)
 			if tt.nilGauge {
 				CertExpirationMetric = nil
 			}
@@ -142,43 +151,52 @@ func TestWorkflowOrchestrator(t *testing.T) {
 			_, loadErr := workflowOrchestrator()
 			if tt.invalidKey {
 				require.ErrorContains(t, loadErr, "PEM data in key input")
-				assert.Zero(t, gaugeValue())
+				assertExpirationValues(0)
 				return
 			}
 			var pathErr *os.PathError
 			require.ErrorAs(t, loadErr, &pathErr)
 			assert.Equal(t, filepath.Join(conf.Temporal.TemporalCertPath, "ca", "ca.crt"), pathErr.Path)
 			if tt.nilGauge {
-				assert.Zero(t, gaugeValue())
+				assertExpirationValues(0)
 				return
 			}
-			assert.Equal(t, float64(expiration.Unix()), gaugeValue())
 			metrics, gatherErr := registry.Gather()
 			require.NoError(t, gatherErr)
-			require.Len(t, metrics, 4)
 			var expirationMetric *dto.MetricFamily
+			var expirationSecondsMetric *dto.MetricFamily
 			for _, metric := range metrics {
-				if metric.GetName() == "nico_rest_site_agent_temporal_cert_expiration" {
+				switch metric.GetName() {
+				case conf.MetricsNamespace + "_temporal_cert_expiration":
 					expirationMetric = metric
-					break
+				case conf.MetricsNamespace + "_temporal_cert_expiration_seconds":
+					expirationSecondsMetric = metric
+				}
+				if tt.namespace != "" {
+					assert.NotEqual(t, "nico_rest_site_agent_temporal_cert_expiration", metric.GetName())
+					assert.NotEqual(t, "nico_rest_site_agent_temporal_cert_expiration_seconds", metric.GetName())
 				}
 			}
-			require.NotNil(t, expirationMetric)
-			require.Len(t, expirationMetric.GetMetric(), 1)
-			assert.Equal(t, float64(expiration.Unix()), expirationMetric.GetMetric()[0].GetGauge().GetValue())
+			for _, metric := range []*dto.MetricFamily{expirationMetric, expirationSecondsMetric} {
+				require.NotNil(t, metric)
+				assert.Equal(t, dto.MetricType_GAUGE, metric.GetType())
+				require.Len(t, metric.GetMetric(), 1)
+				assert.Empty(t, metric.GetMetric()[0].GetLabel())
+				assert.Equal(t, float64(expiration.Unix()), metric.GetMetric()[0].GetGauge().GetValue())
+			}
 			if tt.failedReload {
 				err = os.WriteFile(conf.Temporal.GetTemporalClientKeyFullPath(), []byte("invalid PEM"), 0600)
 				require.NoError(t, err)
 				_, loadErr = workflowOrchestrator()
 				require.ErrorContains(t, loadErr, "PEM data in key input")
-				assert.Equal(t, float64(expiration.Unix()), gaugeValue())
+				assertExpirationValues(float64(expiration.Unix()))
 			}
 			if tt.reload {
 				newExpiration := expiration.Add(24 * time.Hour)
 				writeCertificate(newExpiration)
 				_, loadErr = workflowOrchestrator()
 				require.ErrorAs(t, loadErr, &pathErr)
-				assert.Equal(t, float64(newExpiration.Unix()), gaugeValue())
+				assertExpirationValues(float64(newExpiration.Unix()))
 			}
 		})
 	}
@@ -245,6 +263,74 @@ func TestWorkflowOrchestrator(t *testing.T) {
 			assert.EqualValues(t, 2, service.calls.Load())
 			assert.NotNil(t, data.Managers.Workflow.Temporal.Publisher)
 			assert.NotNil(t, data.Managers.Workflow.Temporal.Subscriber)
+		})
+	}
+}
+
+func TestAPI_Init(t *testing.T) {
+	for _, namespace := range []string{conftypes.DefaultMetricsNamespace, "acme_site_agent"} {
+		t.Run("connection counter aliases with "+namespace, func(t *testing.T) {
+			previousAccess := ManagerAccess
+			previousGauge := CertExpirationMetric
+			previousSecondsGauge := certExpirationSecondsMetric
+			previousRegisterer := prometheus.DefaultRegisterer
+			t.Cleanup(func() {
+				ManagerAccess = previousAccess
+				CertExpirationMetric = previousGauge
+				certExpirationSecondsMetric = previousSecondsGauge
+				prometheus.DefaultRegisterer = previousRegisterer
+			})
+
+			registry := prometheus.NewRegistry()
+			prometheus.DefaultRegisterer = registry
+			conf := &conftypes.Config{MetricsNamespace: namespace}
+			data := &elektratypes.Elektra{Log: zerolog.Nop(), Managers: managertypes.NewManagerType()}
+			NewWorkflowManager(data, nil, &managerapi.ManagerConf{EB: conf}).Init()
+			for _, observation := range []struct {
+				attempted uint64
+				succeeded uint64
+			}{
+				{attempted: 0, succeeded: 0},
+				{attempted: 3, succeeded: 2},
+			} {
+				data.Managers.Workflow.State.ConnectionAttempted.Store(observation.attempted)
+				data.Managers.Workflow.State.ConnectionSucc.Store(observation.succeeded)
+				metrics, gatherErr := registry.Gather()
+				require.NoError(t, gatherErr)
+				byName := make(map[string]*dto.MetricFamily, len(metrics))
+				for _, metric := range metrics {
+					byName[metric.GetName()] = metric
+				}
+				for _, name := range []string{
+					"nico_rest_site_agent_temporal_cert_expiration",
+					"nico_rest_site_agent_temporal_cert_expiration_seconds",
+					"nico_rest_site_agent_temporal_connection_attempted",
+					"nico_rest_site_agent_temporal_connection_attempted_total",
+					"nico_rest_site_agent_temporal_connection_succeeded",
+					"nico_rest_site_agent_temporal_connection_succeeded_total",
+					"nico_rest_site_agent_temporal_connection_status",
+				} {
+					if namespace == conftypes.DefaultMetricsNamespace {
+						assert.Contains(t, byName, name)
+					} else {
+						assert.NotContains(t, byName, name)
+					}
+				}
+				for name, want := range map[string]uint64{
+					"temporal_connection_attempted":       observation.attempted,
+					"temporal_connection_attempted_total": observation.attempted,
+					"temporal_connection_succeeded":       observation.succeeded,
+					"temporal_connection_succeeded_total": observation.succeeded,
+				} {
+					fullName := namespace + "_" + name
+					metric := byName[fullName]
+					require.NotNil(t, metric, fullName)
+					assert.Equal(t, dto.MetricType_COUNTER, metric.GetType(), fullName)
+					require.Len(t, metric.GetMetric(), 1, fullName)
+					assert.Empty(t, metric.GetMetric()[0].GetLabel(), fullName)
+					assert.Equal(t, float64(want), metric.GetMetric()[0].GetCounter().GetValue(), fullName)
+				}
+			}
 		})
 	}
 }

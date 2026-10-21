@@ -525,16 +525,20 @@ func loggingMiddleware(rootCtx context.Context) mux.MiddlewareFunc {
 
 func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 	var latency *prometheus.HistogramVec
-	var count *prometheus.CounterVec
+	var counts []*prometheus.CounterVec
 	if latencyMetricsName != "" {
 		latency = promauto.NewHistogramVec(prometheus.HistogramOpts{
 			Name: fmt.Sprintf("%s_http_duration_seconds", latencyMetricsName),
 			Help: "Duration of HTTP requests.",
 		}, []string{"path", "method"})
-		count = promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: fmt.Sprintf("%s_http_request_counts", latencyMetricsName),
-			Help: "Counter of HTTP requests.",
-		}, []string{"path", "method", "status_code"})
+		// `http_requests_total` is canonical; keep `http_request_counts` for
+		// existing dashboards and alerts.
+		for _, name := range []string{"http_request_counts", "http_requests_total"} {
+			counts = append(counts, promauto.NewCounterVec(prometheus.CounterOpts{
+				Name: fmt.Sprintf("%s_%s", latencyMetricsName, name),
+				Help: "Counter of HTTP requests.",
+			}, []string{"path", "method", "status_code"}))
+		}
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -543,7 +547,7 @@ func metricsMiddleware(latencyMetricsName string) mux.MiddlewareFunc {
 			w := getRRW(rw)
 			defer func() {
 				log.WithField("status_code", w.statusCode).Debugf("Handler finished")
-				if count != nil {
+				for _, count := range counts {
 					count.WithLabelValues(r.URL.Path, r.Method, fmt.Sprintf("%d", w.statusCode)).Inc()
 				}
 				// Return the writer back to the pool
