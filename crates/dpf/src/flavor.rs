@@ -1889,14 +1889,14 @@ fn configure_xplane_network_script_raw() -> String {
 }
 
 fn xplane_legacy_network_script_raw() -> String {
-    indoc::indoc! {r#"
+    let rail_candidate = indoc::indoc! {r#"
         #!/bin/bash
         NETPLAN_FILE="/etc/netplan/99-cx9-rails.yaml"
         set -e
         # Preserve the active netplan until every bridge lookup and write succeeds.
         NETPLAN_TMP="$(mktemp "${NETPLAN_FILE}.tmp.XXXXXX")"
         # Keep a failed candidate for debugging; successful writes rename it into place.
-        trap 'if [ -f "$NETPLAN_TMP" ]; then printf "xplane-bridge.sh: retained failed netplan candidate at %s\n" "$NETPLAN_TMP" >&2; fi' EXIT
+        trap 'if [ -f "$NETPLAN_TMP" ]; then printf "configure-xplane-network.sh: retained failed netplan candidate at %s\n" "$NETPLAN_TMP" >&2; fi' EXIT
 
         # interface prefix | PCI address | bridge. The MAC-to-PCI association is read
         # from the SmartNIC PF config for each interface prefix's p0 port.
@@ -1943,7 +1943,7 @@ fn xplane_legacy_network_script_raw() -> String {
             for row in "${DPU_DEVICE_UNDERLAY_ROWS[@]}"; do
                 IFS='|' read -r mac address gateway route1 route2 <<< "$row"
                 bridge="$(bridge_for_mac "$mac")" || {
-                    echo "xplane-bridge.sh: no bridge found for underlay MAC ${mac}" >&2
+                    echo "configure-xplane-network.sh: no bridge found for underlay MAC ${mac}" >&2
                     exit 1
                 }
                 echo "    ${bridge}:"
@@ -1956,35 +1956,20 @@ fn xplane_legacy_network_script_raw() -> String {
                 echo "          via: ${gateway}"
             done
         } > "$NETPLAN_TMP"
-        # Both files are in the same directory, so replacement is atomic.
-        mv -- "$NETPLAN_TMP" "$NETPLAN_FILE"
+    "#};
+    [
+        rail_candidate,
+        // Read the management requirement before installing or applying network changes.
+        xplane_oob_network_family_script_raw(),
+        indoc::indoc! {r#"
+            # Both files are in the same directory, so replacement is atomic.
+            mv -- "$NETPLAN_TMP" "$NETPLAN_FILE"
 
-        netplan apply
-
-        # Block until oob_net0 has an IP again, since netplan
-        # apply can transiently drop it. Avoids a race with
-        # dpuagent joining the cluster afterwards.
-        OOB_IFACE="oob_net0"
-        OOB_WAIT_TIMEOUT=120
-        SECONDS=0
-
-        while :; do
-            if ip -4 -o addr show dev "$OOB_IFACE" scope global 2>/dev/null | grep -q "inet "; then
-                echo "xplane-bridge.sh: ${OOB_IFACE} has an IP after ${SECONDS}s"
-                break
-            fi
-
-            if [ "$SECONDS" -ge "$OOB_WAIT_TIMEOUT" ]; then
-                echo "xplane-bridge.sh: timed out after ${OOB_WAIT_TIMEOUT}s waiting for ${OOB_IFACE} to have an IP" >&2
-                exit 1
-            fi
-
-            echo "xplane-bridge.sh: waiting for ${OOB_IFACE} to get an IP (${SECONDS}s elapsed)"
-            sleep 2
-        done
-
-    "#}
-    .to_string()
+            netplan apply
+        "#},
+        xplane_oob_network_wait_script_raw(),
+    ]
+    .concat()
 }
 
 fn xplane_network_preamble_raw() -> &'static str {
@@ -2370,25 +2355,71 @@ fn xplane_execute_verified_network_configuration_script_raw() -> &'static str {
     "#}
 }
 
+/// Sets `oob_iface` and `oob_address_family` from merged Netplan before network changes.
+/// Unknown configuration retains IPv4; live addresses can be absent during acquisition or retry.
+fn xplane_oob_network_family_script_raw() -> &'static str {
+    indoc::indoc! {r#"
+        oob_iface="oob_net0"
+        oob_address_family=4
+        # Keep the IPv4 requirement whenever IPv4 is configured, even if only
+        # IPv6 has returned after a failed apply. Ubuntu's Netplan package requires PyYAML.
+        if oob_configuration="$(netplan get "network.ethernets.${oob_iface}")"; then
+            if ! oob_address_family="$(/usr/bin/python3 -I -c '
+        import ipaddress
+        import sys
+        import yaml
+
+        try:
+            configuration = yaml.safe_load(sys.stdin)
+            if not isinstance(configuration, dict):
+                sys.exit("missing OOB Netplan configuration")
+            if any(not isinstance(configuration.get(key, False), bool)
+                   for key in ("dhcp4", "dhcp6", "accept-ra")):
+                raise ValueError("invalid address-family setting")
+            families = set()
+            for entry in configuration.get("addresses", []):
+                # Mapping keys are CIDRs; lifetime controls preference, not existence.
+                for address in (entry if isinstance(entry, dict) else [entry]):
+                    families.add(ipaddress.ip_interface(address).version)
+            if configuration.get("dhcp4") is True or 4 in families:
+                print(4)
+            elif (configuration.get("dhcp6") is True
+                  or configuration.get("accept-ra") is True or 6 in families):
+                print(6)
+            else:
+                sys.exit("no explicit OOB address family configured")
+        except (ValueError, TypeError, yaml.YAMLError):
+            sys.exit("invalid OOB Netplan configuration")
+        ' <<< "$oob_configuration")"; then
+                oob_address_family=4
+                echo "configure-xplane-network.sh: cannot determine configured OOB family; requiring IPv4" >&2
+            fi
+        else
+            echo "configure-xplane-network.sh: cannot read OOB Netplan configuration; requiring IPv4" >&2
+        fi
+    "#}
+}
+
+/// Waits for a usable global address without pinning an address; the family fragment
+/// supplies `oob_iface` and `oob_address_family` from configured intent.
 fn xplane_oob_network_wait_script_raw() -> &'static str {
     indoc::indoc! {r#"
-        # Block until oob_net0 has an IP again, since netplan apply can
-        # transiently drop it. This avoids a race with dpuagent joining
-        # the cluster afterwards.
-        oob_iface="oob_net0"
+        # The DPU agent needs management connectivity for the subsequent cluster join.
+        # Netplan apply can remove addresses temporarily; require the configured family on retries.
         oob_wait_timeout=120
         SECONDS=0
 
         while :; do
-            if ip -4 -o addr show dev "$oob_iface" scope global 2>/dev/null | grep -q "inet "; then
-                echo "configure-xplane-network.sh: ${oob_iface} has an IP after ${SECONDS}s"
+            if oob_addresses="$(ip "-$oob_address_family" -o addr show dev "$oob_iface" scope global -tentative -dadfailed 2>/dev/null)" &&
+                [ -n "$oob_addresses" ]; then
+                echo "configure-xplane-network.sh: ${oob_iface} has a global IPv${oob_address_family} address after ${SECONDS}s"
                 break
             fi
             if [ "$SECONDS" -ge "$oob_wait_timeout" ]; then
-                echo "configure-xplane-network.sh: timed out after ${oob_wait_timeout}s waiting for ${oob_iface} to have an IP" >&2
+                echo "configure-xplane-network.sh: timed out after ${oob_wait_timeout}s waiting for ${oob_iface} to have a global IPv${oob_address_family} address" >&2
                 exit 1
             fi
-            echo "configure-xplane-network.sh: waiting for ${oob_iface} to get an IP (${SECONDS}s elapsed)"
+            echo "configure-xplane-network.sh: waiting for ${oob_iface} to get a global IPv${oob_address_family} address (${SECONDS}s elapsed)"
             sleep 2
         done
     "#}
@@ -2407,10 +2438,12 @@ fn xplane_cerebro_network_script_raw() -> String {
         // Preparation: generate both temporary files while keeping active files unchanged.
         xplane_build_lldp_tmp_configuration_script_raw(),
         xplane_build_netplan_tmp_configuration_script_raw(),
+        // Read the management requirement before installing or applying network changes.
+        xplane_oob_network_family_script_raw(),
         // Execution: only after validation and generation succeed, apply the queued
         // altnames, configure OVS, install both files, and reload/apply the services.
         xplane_execute_verified_network_configuration_script_raw(),
-        // Wait for the OOB address to return after netplan apply.
+        // Wait for the configured OOB family after netplan apply.
         xplane_oob_network_wait_script_raw(),
     ]
     .concat()
@@ -2962,6 +2995,7 @@ done
 
     #[test]
     fn xplane_cerebro_checks_and_stages_files_before_changing_network() {
+        require_oob_parser_dependencies();
         for (scenario, succeeds) in [
             ("success", true),
             ("shared_group_ip", true),
@@ -3024,13 +3058,44 @@ done
             let ovs = fixture.join("ovs.sh");
             fs::write(&ovs, "printf 'ovs\\n' >> \"$TEST_CALLS\"\n").unwrap();
             let calls = fixture.join("calls");
-            let mut preamble = xplane_network_preamble_raw().to_string();
-            let start = preamble
+            // Execute the flavor-provided raw script once to protect composition and serde wiring.
+            let mut script = if scenario == "success" {
+                let flavor = astra_flavor_spec(&None, false);
+                let raw = flavor
+                    .config_files
+                    .unwrap()
+                    .into_iter()
+                    .find(|file| file.path == "/usr/local/sbin/configure-xplane-network.sh")
+                    .unwrap()
+                    .raw
+                    .unwrap();
+                let (_, branches) = raw.split_once("}}").unwrap();
+                branches.split_once("{{ else }}").unwrap().0.to_string()
+            } else {
+                format!(
+                    "{}{}",
+                    xplane_network_preamble_raw(),
+                    xplane_cerebro_network_script_raw()
+                )
+            };
+            let start = script
                 .find("{{- range .dpu_device_underlay_rows }}")
                 .unwrap();
-            let end = start + preamble[start..].find("{{- end }}").unwrap() + "{{- end }}".len();
-            preamble.replace_range(start..end, &rows.join("\n"));
+            let end = start + script[start..].find("{{- end }}").unwrap() + "{{- end }}".len();
+            script.replace_range(start..end, &rows.join("\n"));
+            // The success case configures IPv6 before any address is available.
+            // Reading intent must precede mutation; address readiness must follow apply.
             let stubs = indoc::indoc! {r#"
+                        network_changed=0
+                        netplan_applied=0
+                        sleep_count=0
+                        unset SECONDS
+                        SECONDS=900
+                        sleep() {
+                            [ "$1" = 2 ] && [ "$sleep_count" -lt 60 ] || exit 99
+                            sleep_count=$((sleep_count + 1))
+                            SECONDS=$((sleep_count * 2))
+                        }
                         ip() {
                             if [ "$1" = -o ]; then
                                 dev="${@: -1}"
@@ -3046,9 +3111,17 @@ done
                                     builtin printf '1: %s: mtu 9216\n' "$dev"
                                 fi
                             elif [ "$1" = link ]; then
+                                network_changed=1
                                 builtin printf 'altname %s\n' "$*" >> "$TEST_CALLS"
+                            elif [ "$*" = '-6 -o addr show dev oob_net0 scope global -tentative -dadfailed' ] && [ "$TEST_CASE" = success ]; then
+                                [ "$netplan_applied" = 1 ] || return 0
+                                builtin printf '%s\n' '2: oob_net0 inet6 2001:db8::2/64 scope global dynamic \       valid_lft 3600sec preferred_lft 1800sec'
+                            elif [ "$*" = '-4 -o addr show dev oob_net0 scope global -tentative -dadfailed' ]; then
+                                [ "$TEST_CASE" != success ] || return 0
+                                builtin printf '%s\n' '2: oob_net0 inet 192.0.2.1/24 brd 192.0.2.255 scope global dynamic oob_net0\       valid_lft 3600sec preferred_lft 1800sec'
                             else
-                                builtin printf 'inet 192.0.2.1/24\n'
+                                builtin printf 'unexpected ip arguments: %s\n' "$*" >&2
+                                exit 99
                             fi
                         }
                         printf() {
@@ -3060,9 +3133,24 @@ done
                             builtin printf "$@"
                         }
                         systemctl() { builtin printf 'systemctl\n' >> "$TEST_CALLS"; }
-                        netplan() { builtin printf 'netplan\n' >> "$TEST_CALLS"; }
+                        netplan() {
+                            case "$*" in
+                                'get network.ethernets.oob_net0')
+                                    [ "$network_changed" = 0 ] || return 99
+                                    if [ "$TEST_CASE" = success ]; then
+                                        builtin printf 'configuration\n' >> "$TEST_CALLS"
+                                        builtin printf 'dhcp4: false\ndhcp6: true\naccept-ra: false\n'
+                                    else
+                                        builtin printf 'dhcp4: true\ndhcp6: false\naccept-ra: false\n'
+                                    fi;;
+                                apply)
+                                    netplan_applied=1
+                                    builtin printf 'netplan\n' >> "$TEST_CALLS";;
+                                *) builtin printf 'unexpected netplan arguments: %s\n' "$*" >&2; exit 99;;
+                            esac
+                        }
                     "#};
-            let script = format!("{preamble}{stubs}{}", xplane_cerebro_network_script_raw());
+            let script = format!("{stubs}{script}");
             let output = Command::new("bash")
                 .arg("-c")
                 .arg(script)
@@ -3083,6 +3171,17 @@ done
             );
             let events = fs::read_to_string(&calls).unwrap_or_default();
             if succeeds {
+                if scenario == "success" {
+                    assert!(
+                        events.starts_with("configuration\naltname "),
+                        "{scenario}: {events}"
+                    );
+                    assert_eq!(
+                        String::from_utf8_lossy(&output.stdout),
+                        "configure-xplane-network.sh: oob_net0 has a global IPv6 address after 0s\n",
+                        "{scenario}: readiness output"
+                    );
+                }
                 assert_eq!(
                     events
                         .lines()
@@ -3304,7 +3403,7 @@ done
         let output = Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "netplan() {{ touch \"$TEST_APPLIED\"; }}\n{script}"
+                "netplan() {{ if [ \"$*\" = apply ]; then touch \"$TEST_APPLIED\"; fi; }}\n{script}"
             ))
             .env("TEST_NETPLAN", &netplan)
             .env("TEST_SYSFS", &fixture)
@@ -3338,6 +3437,363 @@ done
         assert!(
             String::from_utf8_lossy(&output.stderr).contains(candidate.to_string_lossy().as_ref())
         );
+        fs::remove_dir_all(&fixture).unwrap();
+    }
+
+    /// Fail with a dependency diagnostic before parser fallback can obscure a missing test prerequisite.
+    fn require_oob_parser_dependencies() {
+        let output = Command::new("/usr/bin/python3")
+            .args(["-I", "-c", "import yaml, ipaddress"])
+            .output()
+            .expect("OOB script tests require /usr/bin/python3; install python3 and python3-yaml");
+        assert!(
+            output.status.success(),
+            "OOB script tests require system PyYAML and ipaddress; install python3 and python3-yaml: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Parse `netplan get` output to select the required family; unknown intent preserves IPv4.
+    /// Execute the embedded parser so YAML address mappings and read failures stay covered.
+    #[test]
+    fn xplane_oob_family_parses_netplan_get_output() {
+        require_oob_parser_dependencies();
+        let parse_fallback =
+            "configure-xplane-network.sh: cannot determine configured OOB family; requiring IPv4\n";
+        check_cases(
+            [
+                // A mapped IPv4 address retains precedence even when its preferred lifetime is zero.
+                Case {
+                    scenario: "static IPv4 takes precedence over DHCPv6",
+                    input: ("dhcp6: true\naddresses:\n  - 192.0.2.1/24:\n      lifetime: '0'\n", 0),
+                    expect: Yields((4, String::new())),
+                },
+
+                // Scalar static addresses select IPv6 without DHCP or an existing live address.
+                Case {
+                    scenario: "static IPv6",
+                    input: ("addresses: [2001:db8::1/64]\n", 0),
+                    expect: Yields((6, String::new())),
+                },
+
+                // Explicit RA enables global IPv6 acquisition independently of DHCPv6.
+                Case {
+                    scenario: "explicit router advertisements",
+                    input: ("dhcp4: false\ndhcp6: false\naccept-ra: true\n", 0),
+                    expect: Yields((6, String::new())),
+                },
+
+                // A missing subtree is not evidence that IPv4 may be waived.
+                Case {
+                    scenario: "missing OOB configuration",
+                    input: ("null\n", 0),
+                    expect: Yields((4, format!("missing OOB Netplan configuration\n{parse_fallback}"))),
+                },
+
+                // Omitted RA defaults must not be interpreted as an explicit IPv6 requirement.
+                Case {
+                    scenario: "no explicit global address family",
+                    input: ("dhcp4: false\ndhcp6: false\n", 0),
+                    expect: Yields((4, format!("no explicit OOB address family configured\n{parse_fallback}"))),
+                },
+
+                // Invalid YAML must report a fallback instead of treating partial output as intent.
+                Case {
+                    scenario: "invalid merged configuration",
+                    input: ("addresses: [\n", 0),
+                    expect: Yields((4, format!("invalid OOB Netplan configuration\n{parse_fallback}"))),
+                },
+
+                // A string-valued DHCP flag cannot waive IPv4 even beside valid DHCPv6 intent.
+                Case {
+                    scenario: "semantic-invalid address-family setting",
+                    input: ("dhcp4: 'true'\ndhcp6: true\n", 0),
+                    expect: Yields((4, format!("invalid OOB Netplan configuration\n{parse_fallback}"))),
+                },
+
+                // A failed query can print valid YAML; its exit status still invalidates that output.
+                Case {
+                    scenario: "failed Netplan query with IPv6 output",
+                    input: ("dhcp6: true\n", 1),
+                    expect: Yields((4, "configure-xplane-network.sh: cannot read OOB Netplan configuration; requiring IPv4\n".to_string())),
+                },
+            ],
+            |(configuration, query_status)| {
+                let script = [
+                    indoc::indoc! {r#"
+                        set -euo pipefail
+                        netplan() {
+                            [ "$*" = 'get network.ethernets.oob_net0' ] || exit 99
+                            printf '%s\n' "$TEST_CONFIGURATION"
+                            return "$TEST_QUERY_STATUS"
+                        }
+                    "#},
+                    xplane_oob_network_family_script_raw(),
+                    "printf '%s\\n' \"$oob_address_family\"\n",
+                ]
+                .concat();
+                let output = Command::new("bash")
+                    .arg("-c")
+                    .arg(script)
+                    .env("TEST_CONFIGURATION", configuration)
+                    .env("TEST_QUERY_STATUS", query_status.to_string())
+                    .output()
+                    .unwrap();
+                if !output.status.success() {
+                    return Err(format!("{output:?}"));
+                }
+                let family = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .parse::<u8>()
+                    .map_err(|error| format!("invalid family: {error}; {output:?}"))?;
+                Ok((family, String::from_utf8(output.stderr).unwrap()))
+            },
+        );
+    }
+
+    /// Models filtered address queries while keeping declared intent stable across retries.
+    /// The fake clock has its own bound so a broken production timeout cannot hang a test.
+    fn oob_network_test_stubs() -> &'static str {
+        indoc::indoc! {r#"
+            network_changed=0
+            sleep_count=0
+            # Unsetting Bash's special variable makes subsequent assignments a fake clock.
+            unset SECONDS
+            SECONDS=900
+            netplan() {
+                if [ -n "${TEST_NETPLAN_CALLS:-}" ]; then
+                    printf '%s\n' "$*" >> "$TEST_NETPLAN_CALLS"
+                fi
+                case "$*" in
+                    'get network.ethernets.oob_net0')
+                        [ "$network_changed" = 0 ] || return 99
+                        if [ -n "${TEST_OOB_CONFIGURATION:-}" ]; then
+                            command cat "$TEST_OOB_CONFIGURATION"
+                        else
+                            printf '%s\n' "$TEST_CONFIGURATION"
+                        fi;;
+                    apply) network_changed=1;;
+                    *) printf 'unexpected netplan arguments: %s\n' "$*" >&2; exit 99;;
+                esac
+            }
+            sleep() {
+                [ "$1" = 2 ] && [ "$sleep_count" -lt 60 ] || exit 99
+                sleep_count=$((sleep_count + 1))
+                SECONDS=$((sleep_count * 2))
+            }
+            ip() {
+                if [ -n "${TEST_READS:-}" ]; then
+                    printf '%s\n' "$*" >> "$TEST_READS"
+                fi
+                case "$*" in
+                    '-4 -o addr show dev oob_net0 scope global -tentative -dadfailed' | '-6 -o addr show dev oob_net0 scope global -tentative -dadfailed') ;;
+                    *) printf 'unexpected ip arguments: %s\n' "$*" >&2; exit 99;;
+                esac
+                v4='2: oob_net0 inet 192.0.2.2/24 brd 192.0.2.255 scope global dynamic oob_net0\       valid_lft 3600sec preferred_lft 1800sec'
+                v6='2: oob_net0 inet6 2001:db8::2/64 scope global dynamic \       valid_lft 3600sec preferred_lft 1800sec'
+                case "$TEST_CASE" in
+                    ipv6_initial)
+                        [ "$1" = -6 ] && [ "$network_changed" = 1 ] && [ "$sleep_count" -gt 0 ] || return 0
+                        printf '%s\n' "$v6"
+                        # Failed reads must not pass even when they print a usable address.
+                        [ "$sleep_count" -ne 1 ];;
+                    dual_stack_delayed)
+                        [ "$1" != -6 ] || { printf '%s\n' "$v6"; return 0; }
+                        [ "$sleep_count" -lt 2 ] || printf '%s\n' "$v4";;
+                    ipv4_timeout)
+                        [ "$1" != -6 ] || printf '%s\n' "$v6";;
+                    recovered)
+                        if [ "$1" = -4 ] && [ "$network_changed" = 1 ]; then
+                            printf '%s\n' "$v4"
+                        fi;;
+                    ipv6_timeout) return 0;;
+                    *) printf 'unexpected address scenario: %s\n' "$TEST_CASE" >&2; exit 99;;
+                esac
+            }
+        "#}
+    }
+
+    /// The configured family must become usable even if initially absent or another family is ready.
+    #[test]
+    fn xplane_oob_wait_requires_the_configured_usable_family() {
+        require_oob_parser_dependencies();
+        check_cases(
+            [
+                // Initially absent IPv6 and a later failed read cannot complete the wait.
+                Case {
+                    scenario: "IPv6 acquisition without an initial address",
+                    input: ("ipv6_initial", "dhcp4: false\ndhcp6: true\n", 6),
+                    expect: Yields("ready:6:2\n".to_string()),
+                },
+                // IPv6 is already ready, but missing configured IPv4 must still be acquired.
+                Case {
+                    scenario: "configured dual-stack IPv4 takes precedence",
+                    input: ("dual_stack_delayed", "dhcp4: true\ndhcp6: true\n", 4),
+                    expect: Yields("ready:4:2\n".to_string()),
+                },
+            ],
+            |(scenario, configuration, family)| {
+                let script = [
+                    "set -euo pipefail\n",
+                    oob_network_test_stubs(),
+                    xplane_oob_network_family_script_raw(),
+                    "netplan apply\n",
+                    xplane_oob_network_wait_script_raw(),
+                    "printf 'ready:%s:%s\\n' \"$oob_address_family\" \"$sleep_count\"\n",
+                ]
+                .concat();
+                let output = Command::new("bash")
+                    .arg("-c")
+                    .arg(script)
+                    .env("TEST_CASE", scenario)
+                    .env("TEST_CONFIGURATION", configuration)
+                    .output()
+                    .unwrap();
+                if !output.status.success() {
+                    return Err(format!("{output:?}"));
+                }
+                assert!(output.stderr.is_empty(), "{scenario}: {output:?}");
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                assert!(stdout.contains(&format!(
+                    "configure-xplane-network.sh: oob_net0 has a global IPv{family} address after 4s\n"
+                )), "{scenario}: {stdout}");
+                Ok(stdout
+                    .split_inclusive('\n')
+                    .next_back()
+                    .unwrap_or_default()
+                    .to_string())
+            },
+        );
+    }
+
+    /// The flavor-provided legacy branch preserves rail configuration through timeout and retry.
+    /// Configured IPv4 suffices on recovery, while IPv6-only intent keeps its own timeout bound.
+    #[test]
+    fn xplane_legacy_oob_timeout_allows_a_successful_rerun() {
+        require_oob_parser_dependencies();
+        let fixture =
+            std::env::temp_dir().join(format!("carbide-dpf-oob-{}", uuid::Uuid::new_v4()));
+        let config = fixture.join("0005:03:00.0/net/A53p0/smart_nic/pf/config");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(config, "00:00:00:00:00:00").unwrap();
+        let netplan = fixture.join("netplan.yaml");
+        let oob_configuration = fixture.join("oob.yaml");
+        fs::write(&oob_configuration, "dhcp4: true\ndhcp6: true\n").unwrap();
+        let reads = fixture.join("reads");
+        let calls = fixture.join("netplan-calls");
+        // Select the legacy branch from the serialized flavor instead of bypassing composition.
+        let raw = astra_flavor_spec(&None, false)
+            .config_files
+            .unwrap()
+            .into_iter()
+            .find(|file| file.path == "/usr/local/sbin/configure-xplane-network.sh")
+            .unwrap()
+            .raw
+            .unwrap();
+        let (_, legacy) = raw.split_once("{{ else }}").unwrap();
+        let (legacy, _) = legacy.rsplit_once("{{ end }}").unwrap();
+        let mut script = legacy
+            .replace(
+                "NETPLAN_FILE=\"/etc/netplan/99-cx9-rails.yaml\"",
+                "NETPLAN_FILE=\"$TEST_NETPLAN\"",
+            )
+            .replace("/sys/bus/pci/devices/", "$TEST_SYSFS/");
+        let rows_start = script
+            .find("{{- range .dpu_device_underlay_rows }}")
+            .unwrap();
+        let rows_end = script[rows_start..].find("\n)\n").unwrap() + rows_start;
+        script.replace_range(
+            rows_start..rows_end,
+            "    \"00:00:00:00:00:00|100.96.0.0/31|100.96.0.1|100.96.0.0/16|100.96.0.0/13\"",
+        );
+        for (scenario, family, expected_exit) in [
+            // Ready IPv6 cannot satisfy the configured IPv4 requirement.
+            ("ipv4_timeout", 4, 1),
+            // Retry with identical configuration succeeds with only IPv4 ready.
+            ("recovered", 4, 0),
+            // Explicit IPv6-only intent must also time out with an IPv6-specific diagnostic.
+            ("ipv6_timeout", 6, 1),
+        ] {
+            if scenario == "ipv6_timeout" {
+                fs::write(&oob_configuration, "dhcp4: false\ndhcp6: true\n").unwrap();
+            }
+            fs::write(&reads, "").unwrap();
+            fs::write(&calls, "").unwrap();
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(format!("{}{script}", oob_network_test_stubs()))
+                .env("TEST_CASE", scenario)
+                .env("TEST_NETPLAN", &netplan)
+                .env("TEST_SYSFS", &fixture)
+                .env("TEST_OOB_CONFIGURATION", &oob_configuration)
+                .env("TEST_READS", &reads)
+                .env("TEST_NETPLAN_CALLS", &calls)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(expected_exit),
+                "{scenario}: {output:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(&netplan).unwrap(),
+                indoc::indoc! {"
+                    network:
+                      version: 2
+                      ethernets:
+                        brcx-A53:
+                          addresses:
+                            - 100.96.0.0/31
+                          routes:
+                            - to: 100.96.0.0/16
+                              via: 100.96.0.1
+                            - to: 100.96.0.0/13
+                              via: 100.96.0.1
+                "},
+                "{scenario}: installed rail configuration"
+            );
+            assert_eq!(
+                fs::read_to_string(&calls).unwrap(),
+                "get network.ethernets.oob_net0\napply\n",
+                "{scenario}: read intent before applying the network"
+            );
+            let expected_query =
+                format!("-{family} -o addr show dev oob_net0 scope global -tentative -dadfailed\n");
+            if expected_exit == 1 {
+                let expected_wait = (0..60).map(|poll| format!(
+                    "configure-xplane-network.sh: waiting for oob_net0 to get a global IPv{family} address ({}s elapsed)\n", poll * 2
+                )).collect::<String>();
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout),
+                    expected_wait,
+                    "{scenario}: bounded family-specific polling"
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stderr),
+                    format!(
+                        "configure-xplane-network.sh: timed out after 120s waiting for oob_net0 to have a global IPv{family} address\n"
+                    ),
+                    "{scenario}: timeout diagnostic"
+                );
+                assert_eq!(
+                    fs::read_to_string(&reads).unwrap(),
+                    expected_query.repeat(61),
+                    "{scenario}: required-family queries"
+                );
+            } else {
+                assert!(output.stderr.is_empty(), "{scenario}: {output:?}");
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout),
+                    "configure-xplane-network.sh: oob_net0 has a global IPv4 address after 0s\n",
+                    "{scenario}: IPv4-only recovery"
+                );
+                assert_eq!(
+                    fs::read_to_string(&reads).unwrap(),
+                    expected_query,
+                    "{scenario}: required-family query"
+                );
+            }
+        }
         fs::remove_dir_all(&fixture).unwrap();
     }
 
@@ -4534,27 +4990,6 @@ done
                         ]
                         .into_iter()
                         .all(|row| ovs_setup_script.contains(row))
-                } => true,
-            }
-
-            "xplane bridge setup waits for OOB connectivity" {
-                {
-                    let xplane_script = flavor
-                        .spec
-                        .config_files
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                        .find(|file| file.path == "/usr/local/sbin/configure-xplane-network.sh")
-                        .and_then(|file| file.raw.as_ref())
-                        .unwrap();
-                    xplane_script.contains("OOB_WAIT_TIMEOUT=120")
-                        && xplane_script.contains(
-                            "ip -4 -o addr show dev \"$OOB_IFACE\" scope global",
-                        )
-                        && xplane_script.contains(
-                            "timed out after ${OOB_WAIT_TIMEOUT}s waiting for ${OOB_IFACE} to have an IP",
-                        )
                 } => true,
             }
 

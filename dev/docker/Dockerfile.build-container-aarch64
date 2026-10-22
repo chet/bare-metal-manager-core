@@ -63,6 +63,7 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		lld \
 		postgresql-15 \
 		protobuf-compiler \
+		python3-yaml \
 		sudo \
 		unzip \
 		wget \

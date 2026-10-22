@@ -15,6 +15,7 @@ RUN apt-get update && \
 	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 	libprotobuf-dev \
 	protobuf-compiler \
+	python3-yaml \
 	libpq-dev \
 	libssl-dev \
 	clang \
