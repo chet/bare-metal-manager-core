@@ -19,6 +19,7 @@
 // than huge inline rust strings.
 
 use lazy_static::lazy_static;
+use model::machine::HardwareInventoryScope;
 
 static MANAGED_HOSTS_TEMPLATE: &str = include_str!("sql/managed_hosts.sql.template");
 static MACHINE_SNAPSHOTS_TEMPLATE: &str = include_str!("sql/machine_snapshots.sql.template");
@@ -27,6 +28,9 @@ static MANAGED_HOST_HISTORY_JOIN_SNIPPET: &str =
 static MACHINE_SNAPSHOT_HISTORY_JOIN_SNIPPET: &str =
     include_str!("sql/machine_snapshot_history_join.snippet");
 static HISTORY_SELECT_SNIPPET: &str = include_str!("sql/history_select.snippet");
+static TOPOLOGY_SNIPPET: &str = include_str!("sql/topology.snippet");
+static NETWORK_IDENTITY_TOPOLOGY_SNIPPET: &str =
+    include_str!("sql/network_identity_topology.snippet");
 
 fn replace_sql<F: Fn(&str) -> Option<&str>>(input: &str, f: F) -> String {
     input
@@ -42,22 +46,27 @@ fn replace_sql<F: Fn(&str) -> Option<&str>>(input: &str, f: F) -> String {
         .join(" ")
 }
 
+fn managed_hosts(history: bool, hardware_inventory: HardwareInventoryScope) -> String {
+    replace_sql(MANAGED_HOSTS_TEMPLATE, |line| match line {
+        "__HISTORY_SELECT__" => history.then_some(HISTORY_SELECT_SNIPPET),
+        "__HISTORY_JOIN__" => history.then_some(MANAGED_HOST_HISTORY_JOIN_SNIPPET),
+        "__TOPOLOGY__" => Some(match hardware_inventory {
+            HardwareInventoryScope::Full => TOPOLOGY_SNIPPET,
+            HardwareInventoryScope::NetworkIdentity => NETWORK_IDENTITY_TOPOLOGY_SNIPPET,
+        }),
+        default => Some(default),
+    })
+}
+
 lazy_static! {
     pub static ref MANAGED_HOSTS_WITH_HISTORY: String =
-        replace_sql(MANAGED_HOSTS_TEMPLATE, |line| {
-            match line {
-                "__HISTORY_SELECT__" => Some(HISTORY_SELECT_SNIPPET),
-                "__HISTORY_JOIN__" => Some(MANAGED_HOST_HISTORY_JOIN_SNIPPET),
-                default => Some(default),
-            }
-        });
-    pub static ref MANAGED_HOSTS_NO_HISTORY: String = replace_sql(MANAGED_HOSTS_TEMPLATE, |line| {
-        match line {
-            "__HISTORY_SELECT__" => None,
-            "__HISTORY_JOIN__" => None,
-            default => Some(default),
-        }
-    });
+        managed_hosts(true, HardwareInventoryScope::Full);
+    pub static ref MANAGED_HOSTS_NO_HISTORY: String =
+        managed_hosts(false, HardwareInventoryScope::Full);
+    pub static ref MANAGED_HOSTS_NETWORK_IDENTITY_WITH_HISTORY: String =
+        managed_hosts(true, HardwareInventoryScope::NetworkIdentity);
+    pub static ref MANAGED_HOSTS_NETWORK_IDENTITY_NO_HISTORY: String =
+        managed_hosts(false, HardwareInventoryScope::NetworkIdentity);
     pub static ref MACHINE_SNAPSHOTS_WITH_HISTORY: String =
         replace_sql(MACHINE_SNAPSHOTS_TEMPLATE, |line| {
             match line {

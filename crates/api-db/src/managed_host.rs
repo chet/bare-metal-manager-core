@@ -18,7 +18,6 @@
 //! Database access methods for manipulating the state of a ManagedHost (Host+DPUs)
 
 use std::collections::HashMap;
-use std::ops::Deref;
 
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{
@@ -28,7 +27,7 @@ use carbide_uuid::machine::{
 use carbide_uuid::rack::RackId;
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use model::machine::{LoadSnapshotOptions, ManagedHostStateSnapshot};
+use model::machine::{HardwareInventoryScope, LoadSnapshotOptions, ManagedHostStateSnapshot};
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
@@ -46,7 +45,28 @@ pub async fn load_snapshot<DB>(
 where
     for<'db> &'db mut DB: DbReader<'db>,
 {
-    let mut snapshots = load_by_machine_ids(txn, std::slice::from_ref(machine_id), options).await?;
+    load_snapshot_with_inventory(txn, machine_id, options, HardwareInventoryScope::Full).await
+}
+
+/// Loads a ManagedHost snapshot whose host and DPU snapshots hold only the
+/// discovered hardware collections in `hardware_inventory`. The returned
+/// snapshot records that scope; collections outside it are empty.
+pub async fn load_snapshot_with_inventory<DB>(
+    txn: &mut DB,
+    machine_id: &MachineId,
+    options: LoadSnapshotOptions,
+    hardware_inventory: HardwareInventoryScope,
+) -> Result<Option<ManagedHostStateSnapshot>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let mut snapshots = load_by_machine_ids_with_inventory(
+        txn,
+        std::slice::from_ref(machine_id),
+        options,
+        hardware_inventory,
+    )
+    .await?;
     Ok(snapshots.remove(machine_id))
 }
 
@@ -55,7 +75,9 @@ pub async fn load_all(
     txn: impl DbReader<'_>,
     options: LoadSnapshotOptions,
 ) -> Result<Vec<ManagedHostStateSnapshot>, DatabaseError> {
-    let mut query = sqlx::QueryBuilder::new(managed_host_snapshots_query(&options).to_string());
+    let mut query = sqlx::QueryBuilder::new(
+        managed_host_snapshots_query(&options, HardwareInventoryScope::Full).to_string(),
+    );
     query.push(" WHERE NOT starts_with(m.id, ");
     query.push_bind(MachineType::Dpu.id_prefix());
     query.push(")");
@@ -132,6 +154,26 @@ where
     ID: MachineIdSubtypeTrait,
     DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
 {
+    load_by_machine_ids_with_inventory(
+        txn,
+        requested_machine_ids,
+        options,
+        HardwareInventoryScope::Full,
+    )
+    .await
+}
+
+async fn load_by_machine_ids_with_inventory<DB, ID>(
+    txn: &mut DB,
+    requested_machine_ids: &[ID],
+    options: LoadSnapshotOptions,
+    hardware_inventory: HardwareInventoryScope,
+) -> Result<HashMap<ID, ManagedHostStateSnapshot>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+    ID: MachineIdSubtypeTrait,
+    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
     // Partition the ID's by whether or not they're DPU's.
     let mut requested_dpu_ids = Vec::new();
     let mut requested_host_ids = Vec::new();
@@ -167,7 +209,9 @@ where
 
     // Perf optimization: If we're only requesting one ID, do `WHERE m.id = $1`. In practice on a db
     // with lots of hosts, this reduces the query time from ~20ms down to ~0.7ms.
-    let mut query = sqlx::QueryBuilder::new(managed_host_snapshots_query(&options).to_string());
+    let mut query = sqlx::QueryBuilder::new(
+        managed_host_snapshots_query(&options, hardware_inventory).to_string(),
+    );
     if host_ids.len() == 1 {
         query.push(" WHERE m.id = ");
         query.push_bind(&host_ids[0]);
@@ -188,6 +232,7 @@ where
         .into_iter()
         .map(|mut snapshot: ManagedHostStateSnapshot| {
             snapshot.derive_aggregate_health(options.host_health_config);
+            snapshot.hardware_inventory = hardware_inventory;
             (snapshot.host_snapshot.id, snapshot)
         })
         .collect();
@@ -249,7 +294,7 @@ pub async fn load_by_instance_ids(
         INNER JOIN instances i ON i.machine_id = m.id
         WHERE i.id = ANY(
     "#,
-        managed_host_snapshots_query(&load_snapshot_options)
+        managed_host_snapshots_query(&load_snapshot_options, HardwareInventoryScope::Full)
     );
     let result: Vec<ManagedHostStateSnapshot> = sqlx::QueryBuilder::new(query)
         .push_bind(instance_ids)
@@ -267,37 +312,52 @@ pub async fn load_by_instance_ids(
     Ok(result)
 }
 
+fn with_instances(managed_hosts: &str) -> String {
+    format!(
+        r#"
+        SELECT m.*, COALESCE(row_to_json(i.*), 'null') AS instance
+        FROM ({managed_hosts}) m
+        LEFT JOIN instances i ON i.machine_id = m.id
+        "#
+    )
+}
+
 // Return the appropriate query to use for finding managed hosts, depending on the options
-fn managed_host_snapshots_query(options: &LoadSnapshotOptions) -> &str {
+fn managed_host_snapshots_query(
+    options: &LoadSnapshotOptions,
+    hardware_inventory: HardwareInventoryScope,
+) -> &'static str {
     // Use lazy_static so we don't have to interpolate strings every time
     lazy_static! {
-        static ref managed_host_snapshots_with_instances_query: String = format!(
-            r#"
-        SELECT m.*, COALESCE(row_to_json(i.*), 'null') AS instance
-        FROM ({}) m
-        LEFT JOIN instances i ON i.machine_id = m.id
-        "#,
-            queries::MANAGED_HOSTS_NO_HISTORY.as_str(),
-        );
-        static ref managed_host_snapshots_with_instances_and_history_query: String = format!(
-            r#"
-        SELECT m.*, COALESCE(row_to_json(i.*), 'null') AS instance
-        FROM ({}) m
-        LEFT JOIN instances i ON i.machine_id = m.id
-        "#,
-            queries::MANAGED_HOSTS_WITH_HISTORY.as_str(),
-        );
+        static ref managed_host_snapshots_with_instances_query: String =
+            with_instances(&queries::MANAGED_HOSTS_NO_HISTORY);
+        static ref managed_host_snapshots_with_instances_and_history_query: String =
+            with_instances(&queries::MANAGED_HOSTS_WITH_HISTORY);
+        static ref network_identity_snapshots_with_instances_query: String =
+            with_instances(&queries::MANAGED_HOSTS_NETWORK_IDENTITY_NO_HISTORY);
+        static ref network_identity_snapshots_with_instances_and_history_query: String =
+            with_instances(&queries::MANAGED_HOSTS_NETWORK_IDENTITY_WITH_HISTORY);
     }
 
-    if options.include_instance_data {
-        if options.include_history {
-            managed_host_snapshots_with_instances_and_history_query.deref()
-        } else {
-            managed_host_snapshots_with_instances_query.deref()
+    use HardwareInventoryScope::{Full, NetworkIdentity};
+    match (
+        hardware_inventory,
+        options.include_instance_data,
+        options.include_history,
+    ) {
+        (Full, true, false) => managed_host_snapshots_with_instances_query.as_str(),
+        (Full, true, true) => managed_host_snapshots_with_instances_and_history_query.as_str(),
+        (Full, false, false) => queries::MANAGED_HOSTS_NO_HISTORY.as_str(),
+        (Full, false, true) => queries::MANAGED_HOSTS_WITH_HISTORY.as_str(),
+        (NetworkIdentity, true, false) => network_identity_snapshots_with_instances_query.as_str(),
+        (NetworkIdentity, true, true) => {
+            network_identity_snapshots_with_instances_and_history_query.as_str()
         }
-    } else if options.include_history {
-        &queries::MANAGED_HOSTS_WITH_HISTORY
-    } else {
-        &queries::MANAGED_HOSTS_NO_HISTORY
+        (NetworkIdentity, false, false) => {
+            queries::MANAGED_HOSTS_NETWORK_IDENTITY_NO_HISTORY.as_str()
+        }
+        (NetworkIdentity, false, true) => {
+            queries::MANAGED_HOSTS_NETWORK_IDENTITY_WITH_HISTORY.as_str()
+        }
     }
 }

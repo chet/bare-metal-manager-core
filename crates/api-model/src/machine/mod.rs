@@ -158,6 +158,9 @@ pub struct ManagedHostStateSnapshot {
     /// Health overrides inherited from the rack this host belongs to (if any).
     /// Populated at read time; not stored on the machines table.
     pub rack_health_overrides: Option<HealthReportSources>,
+    /// Which discovered hardware collections the host and DPU snapshots hold.
+    /// Populated at read time by the loader.
+    pub hardware_inventory: HardwareInventoryScope,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
@@ -232,6 +235,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
             // This will need to be modified by callers, as its value depends on a
             // HardwareHealthReportsConfig being specified.
             aggregate_health: health_report::HealthReport::empty("".to_string()),
+            // Loaders record the scope they requested.
+            hardware_inventory: HardwareInventoryScope::Full,
         };
 
         result.sort_dpu_snapshots()?;
@@ -3731,6 +3736,20 @@ impl Display for MachineValidationFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(self, f)
     }
+}
+
+/// Which discovered hardware collections a snapshot load decodes into each
+/// machine's `status.hardware_info`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HardwareInventoryScope {
+    /// Every discovered hardware collection.
+    #[default]
+    Full,
+    /// Only the hardware that identifies the platform and its network devices:
+    /// architecture, network interfaces, TPM endorsement certificate, DMI data
+    /// and DPU data. CPU, memory, block device, NVMe, GPU, InfiniBand and TPM
+    /// description collections are not loaded, and are empty when decoded.
+    NetworkIdentity,
 }
 
 pub struct LoadSnapshotOptions {

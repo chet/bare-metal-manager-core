@@ -47,7 +47,8 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::network::MachineNetworkStatusObservation;
 use model::machine::upgrade_policy::{AgentUpgradePolicy, BuildVersion};
 use model::machine::{
-    InstanceState, LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot,
+    HardwareInventoryScope, InstanceState, LoadSnapshotOptions, ManagedHostState,
+    ManagedHostStateSnapshot,
 };
 use model::machine_update_module::HOST_UPDATE_HEALTH_PROBE_ID;
 use model::network_segment::NetworkSegmentSearchConfig;
@@ -163,10 +164,13 @@ async fn get_managed_host_network_config_inner(
     let mut txn = api.txn_begin().await?;
     db::tenant_prefix_overlap::lock_config(txn.as_mut()).await?;
 
-    let snapshot = db::managed_host::load_snapshot(
+    // Network configuration reads only the hardware that identifies the host's
+    // network devices, so skip loading the rest of its discovered inventory.
+    let snapshot = db::managed_host::load_snapshot_with_inventory(
         &mut txn,
         &dpu_machine_id,
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
+        HardwareInventoryScope::NetworkIdentity,
     )
     .await?
     .ok_or(CarbideError::NotFoundError {
