@@ -33,7 +33,7 @@ use crate::instance::config::network::{
     InterfaceFunctionId,
 };
 use crate::instance::status::SyncState;
-use crate::machine::DpuMachine;
+use crate::machine::Machine;
 use crate::network_security_group::NetworkSecurityGroupStatusObservation;
 
 /// Status of the networking subsystem of an instance
@@ -479,8 +479,8 @@ impl InstanceNetworkStatusObservation {
             || self.instance_config_version != other.instance_config_version
     }
 
-    pub fn aggregate_instance_observation(
-        dpu_snapshots: &[DpuMachine],
+    pub fn aggregate_instance_observation<HW>(
+        dpu_snapshots: &[Machine<DpuMachineId, HW>],
     ) -> HashMap<DpuMachineId, InstanceNetworkStatusObservation> {
         let mut observation_map = HashMap::default();
 

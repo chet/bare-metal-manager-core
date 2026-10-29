@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::extension_service::ExtensionServiceType;
 use crate::instance::config::extension_services::InstanceExtensionServicesConfig;
 use crate::instance::status::SyncState;
-use crate::machine::DpuMachine;
+use crate::machine::Machine;
 
 /// The status of all extension services configured on an instance
 #[derive(Clone, Debug)]
@@ -470,8 +470,8 @@ impl InstanceExtensionServiceStatusObservationByType {
     }
 
     /// Aggregates persisted type-partitioned observations.
-    pub fn aggregate_instance_observation(
-        dpu_snapshots: &[DpuMachine],
+    pub fn aggregate_instance_observation<HW>(
+        dpu_snapshots: &[Machine<DpuMachineId, HW>],
     ) -> HashMap<DpuMachineId, Self> {
         dpu_snapshots
             .iter()

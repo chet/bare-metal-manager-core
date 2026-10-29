@@ -163,10 +163,10 @@ async fn get_managed_host_network_config_inner(
     let mut txn = api.txn_begin().await?;
     db::tenant_prefix_overlap::lock_config(txn.as_mut()).await?;
 
-    let snapshot = db::managed_host::load_snapshot(
+    let snapshot = db::managed_host::load_snapshot_with_hardware_identity(
         &mut txn,
         &dpu_machine_id,
-        LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
+        api.runtime_config.host_health,
     )
     .await?
     .ok_or(CarbideError::NotFoundError {

@@ -49,7 +49,7 @@ async fn update(
     );
     let query = format!(
         "UPDATE machine_topologies SET topology=jsonb_set(topology, '{{discovery_data}}', $2::jsonb), topology_update_needed=false, updated=NOW() WHERE machine_id=$1 RETURNING {}",
-        MachineTopology::db_table_columns(),
+        <MachineTopology>::db_table_columns(),
     );
     let res = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(machine_id)
@@ -98,7 +98,7 @@ pub async fn create_or_update(
 
     let query = format!(
         "INSERT INTO machine_topologies VALUES ($1, $2::json) RETURNING {}",
-        MachineTopology::db_table_columns(),
+        <MachineTopology>::db_table_columns(),
     );
     let res = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(machine_id)
@@ -211,7 +211,7 @@ pub async fn find_by_machine_ids<ID: MachineIdSubtypeTrait>(
     let str_ids: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
     let query = format!(
         "SELECT {} FROM machine_topologies WHERE machine_id=ANY($1)",
-        MachineTopology::db_table_columns(),
+        <MachineTopology>::db_table_columns(),
     );
     let topologies = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(str_ids)

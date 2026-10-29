@@ -28,7 +28,9 @@ use carbide_uuid::machine::{
 use carbide_uuid::rack::RackId;
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use model::machine::{LoadSnapshotOptions, ManagedHostStateSnapshot};
+use model::hardware_info::{DiscoveredHardware, HardwareIdentity};
+use model::machine::{HostHealthConfig, LoadSnapshotOptions, ManagedHostStateSnapshot};
+use serde::de::DeserializeOwned;
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
@@ -47,6 +49,31 @@ where
     for<'db> &'db mut DB: DbReader<'db>,
 {
     let mut snapshots = load_by_machine_ids(txn, std::slice::from_ref(machine_id), options).await?;
+    Ok(snapshots.remove(machine_id))
+}
+
+/// load_snapshot_with_hardware_identity loads the ManagedHost for `machine_id`
+/// with every machine's hardware decoded as [`HardwareIdentity`]: CPU
+/// architecture, NICs, TPM endorsement certificate, DPU identity, and DMI data.
+///
+/// CPU, GPU, memory, block, NVMe, and InfiniBand inventory are neither read nor
+/// decoded; use [`load_snapshot`] when a caller needs them. Instance data is
+/// loaded and state history is not.
+pub async fn load_snapshot_with_hardware_identity<DB>(
+    txn: &mut DB,
+    machine_id: &MachineId,
+    host_health_config: HostHealthConfig,
+) -> Result<Option<ManagedHostStateSnapshot<HardwareIdentity>>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let mut snapshots = load_snapshots_by_machine_ids(
+        txn,
+        std::slice::from_ref(machine_id),
+        managed_host_identity_snapshots_query(),
+        host_health_config,
+    )
+    .await?;
     Ok(snapshots.remove(machine_id))
 }
 
@@ -132,6 +159,30 @@ where
     ID: MachineIdSubtypeTrait,
     DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
 {
+    load_snapshots_by_machine_ids(
+        txn,
+        requested_machine_ids,
+        managed_host_snapshots_query(&options),
+        options.host_health_config,
+    )
+    .await
+}
+
+/// load_snapshots_by_machine_ids runs `snapshot_query` for the hosts behind
+/// `requested_machine_ids`, decoding each machine's hardware as `HW`, and keys
+/// the snapshots by the requested IDs.
+async fn load_snapshots_by_machine_ids<DB, ID, HW>(
+    txn: &mut DB,
+    requested_machine_ids: &[ID],
+    snapshot_query: &str,
+    host_health_config: HostHealthConfig,
+) -> Result<HashMap<ID, ManagedHostStateSnapshot<HW>>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+    ID: MachineIdSubtypeTrait,
+    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+    HW: DiscoveredHardware + DeserializeOwned + Clone + Send + Unpin,
+{
     // Partition the ID's by whether or not they're DPU's.
     let mut requested_dpu_ids = Vec::new();
     let mut requested_host_ids = Vec::new();
@@ -167,7 +218,7 @@ where
 
     // Perf optimization: If we're only requesting one ID, do `WHERE m.id = $1`. In practice on a db
     // with lots of hosts, this reduces the query time from ~20ms down to ~0.7ms.
-    let mut query = sqlx::QueryBuilder::new(managed_host_snapshots_query(&options).to_string());
+    let mut query = sqlx::QueryBuilder::new(snapshot_query.to_string());
     if host_ids.len() == 1 {
         query.push(" WHERE m.id = ");
         query.push_bind(&host_ids[0]);
@@ -180,14 +231,14 @@ where
     // Index snapshots into a HashMap by their machine_id, while calling derive_aggregate_health on
     // each. It's mut because we are going to re-index by the ID's that the user requested, which
     // may be different from the managed_host ID.
-    let mut snapshots_by_host_id: HashMap<HostMachineId, ManagedHostStateSnapshot> = query
+    let mut snapshots_by_host_id: HashMap<HostMachineId, ManagedHostStateSnapshot<HW>> = query
         .build_query_as()
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::new("managed_host::load_by_machine_ids", e))?
         .into_iter()
-        .map(|mut snapshot: ManagedHostStateSnapshot| {
-            snapshot.derive_aggregate_health(options.host_health_config);
+        .map(|mut snapshot: ManagedHostStateSnapshot<HW>| {
+            snapshot.derive_aggregate_health(host_health_config);
             (snapshot.host_snapshot.id, snapshot)
         })
         .collect();
@@ -265,6 +316,22 @@ pub async fn load_by_instance_ids(
         })
         .collect();
     Ok(result)
+}
+
+// Return the hardware-identity snapshot query: instances included, no history.
+fn managed_host_identity_snapshots_query() -> &'static str {
+    lazy_static! {
+        static ref managed_host_identity_snapshots_with_instances_query: String = format!(
+            r#"
+        SELECT m.*, COALESCE(row_to_json(i.*), 'null') AS instance
+        FROM ({}) m
+        LEFT JOIN instances i ON i.machine_id = m.id
+        "#,
+            queries::MANAGED_HOST_IDENTITIES_NO_HISTORY.as_str(),
+        );
+    }
+
+    managed_host_identity_snapshots_with_instances_query.deref()
 }
 
 // Return the appropriate query to use for finding managed hosts, depending on the options

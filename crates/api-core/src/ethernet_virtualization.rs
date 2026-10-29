@@ -27,6 +27,7 @@ use db::vpc::{self};
 use db::vpc_peering::get_prefixes_by_vpcs;
 use db::{self, ObjectColumnFilter, network_security_group};
 use ipnetwork::IpNetwork;
+use model::hardware_info::DiscoveredHardware;
 use model::instance::config::network::{
     InstanceInterfaceConfig, InstanceInterfaceRoutingProfile, InstanceNetworkConfig,
     InterfaceFunctionId,
@@ -390,9 +391,9 @@ fn build_ipv6_interface_config(
 // This writer keeps the deprecated IPv4 fields populated when IPv4 is configured so older
 // agents can consume IPv4-only and dual-stack payloads during the rollout.
 #[allow(deprecated)]
-pub(crate) async fn admin_network(
+pub(crate) async fn admin_network<HW: DiscoveredHardware>(
     txn: &mut PgConnection,
-    snapshot: &ManagedHostStateSnapshot,
+    snapshot: &ManagedHostStateSnapshot<HW>,
     dpu_machine_id: &DpuMachineId,
     options: AdminNetworkOptions<'_>,
 ) -> Result<(rpc::FlatInterfaceConfig, MachineInterfaceId), tonic::Status> {

@@ -30,6 +30,7 @@ use carbide_uuid::vpc::VpcId;
 use db::ObjectColumnFilter;
 pub(super) use instances::validate_affected_instances;
 use ipnetwork::IpNetwork;
+use model::hardware_info::DiscoveredHardware;
 use model::instance::InstanceSearchFilter;
 use model::instance::config::InstanceConfig;
 use model::instance::config::network::InstanceNetworkConfig;
@@ -362,10 +363,10 @@ fn policy_error() -> CarbideError {
 /// without another API request, including a pending replacement. The caller
 /// holds the overlap lock before loading the host and through configuration
 /// generation. Admission gates may be off during drain; isolation must remain.
-pub(super) async fn validate_retained_host(
+pub(super) async fn validate_retained_host<HW: DiscoveredHardware>(
     api: &Api,
     txn: &mut PgConnection,
-    host: &ManagedHostStateSnapshot,
+    host: &ManagedHostStateSnapshot<HW>,
 ) -> CarbideResult<()> {
     if !needs_retained_policy_check(host) {
         return Ok(());
@@ -641,7 +642,9 @@ pub(super) async fn validate_vpc_policy(
     Ok(())
 }
 
-fn needs_retained_policy_check(host: &ManagedHostStateSnapshot) -> bool {
+fn needs_retained_policy_check<HW: DiscoveredHardware>(
+    host: &ManagedHostStateSnapshot<HW>,
+) -> bool {
     // Even a canceled allocation can advance to tenant networking. Only the
     // controller's return-to-Admin state guarantees no later activation.
     let removing_tenant_network = host.use_admin_network()
@@ -685,9 +688,9 @@ async fn load_policy_hosts(
     )
 }
 
-async fn retained_policy_vpcs(
+async fn retained_policy_vpcs<HW: DiscoveredHardware>(
     txn: &mut PgConnection,
-    host: &ManagedHostStateSnapshot,
+    host: &ManagedHostStateSnapshot<HW>,
 ) -> CarbideResult<Vec<Vpc>> {
     let Some(instance) = &host.instance else {
         return Ok(Vec::new());

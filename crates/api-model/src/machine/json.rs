@@ -17,7 +17,9 @@
 use std::collections::HashMap;
 
 use carbide_uuid::instance_type::InstanceTypeId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, MachineId, PredictedHostMachineId, StableHostMachineId,
+};
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::rack::RackId;
 use chrono::{DateTime, Utc};
@@ -28,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bmc_info::BmcInfo;
 use crate::controller_outcome::PersistentStateHandlerOutcome;
-use crate::hardware_info::{MachineInventory, MachineNvLinkInfo};
+use crate::hardware_info::{HardwareInfo, MachineInventory, MachineNvLinkInfo};
 use crate::instance::status::extension_service::InstanceExtensionServiceStatusObservationByType;
 use crate::machine::health_override::HealthReportSources;
 use crate::machine::infiniband::MachineInfinibandStatusObservation;
@@ -39,10 +41,10 @@ use crate::machine::spx_multiplane::MachineSpxMultiplaneStatus;
 use crate::machine::status::MlxDeviceObservation;
 use crate::machine::topology::MachineTopology;
 use crate::machine::{
-    AnyMachine, Dpf, DpuMachine, FailureDetails, HostMachine, HostProfile, HostReprovisionRequest,
-    MachineConfig, MachineInterfaceSnapshot, MachineLastRebootRequested, MachineMaintenanceRequest,
-    MachineSpxMultiplane, MachineStatus, ManagedHostState, PredictedHostMachine,
-    ReprovisionRequest, ResetRequest, StableHostMachine, UpgradeDecision,
+    Dpf, FailureDetails, HostProfile, HostReprovisionRequest, Machine, MachineConfig,
+    MachineInterfaceSnapshot, MachineLastRebootRequested, MachineMaintenanceRequest,
+    MachineSpxMultiplane, MachineStatus, ManagedHostState, ReprovisionRequest, ResetRequest,
+    UpgradeDecision,
 };
 use crate::machine_boot_interface::{
     BootInterfaceSelection, BootInterfaceSelectionSource, BootInterfaceStatusObservation,
@@ -60,7 +62,7 @@ use crate::state_history::StateHistoryRecord;
 /// exactly. It's expected that we read this directly from the JSON returned by the query, and then
 /// convert it into a Machine.
 #[derive(Serialize, Deserialize)]
-pub struct MachineSnapshotPgJson {
+pub struct MachineSnapshotPgJson<HW = HardwareInfo> {
     pub id: MachineId,
     pub rack_id: Option<RackId>,
     pub created: DateTime<Utc>,
@@ -125,7 +127,7 @@ pub struct MachineSnapshotPgJson {
     pub machine_state_model_version: i32,
     pub instance_type_id: Option<InstanceTypeId>,
     pub interfaces: Vec<MachineInterfaceSnapshot>,
-    pub topology: Vec<MachineTopology>,
+    pub topology: Vec<MachineTopology<HW>>,
     pub bmc_info: BmcInfo,
     pub labels: HashMap<String, String>,
     pub name: String,
@@ -268,9 +270,9 @@ fn decode_boot_interface_status_observation(
     }
 }
 
-impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
+impl<HW> TryFrom<MachineSnapshotPgJson<HW>> for Machine<MachineId, HW> {
     type Error = sqlx::Error;
-    fn try_from(value: MachineSnapshotPgJson) -> Result<Self, Self::Error> {
+    fn try_from(value: MachineSnapshotPgJson<HW>) -> Result<Self, Self::Error> {
         let hardware_info = value
             .topology
             .into_iter()
@@ -423,12 +425,12 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
 }
 
 macro_rules! delegate_try_from_machine_snapshot_pg_json_impl {
-    ($type:ty) => {
-        impl TryFrom<MachineSnapshotPgJson> for $type {
+    ($id:ty) => {
+        impl<HW> TryFrom<MachineSnapshotPgJson<HW>> for Machine<$id, HW> {
             type Error = sqlx::Error;
 
-            fn try_from(value: MachineSnapshotPgJson) -> Result<Self, Self::Error> {
-                AnyMachine::try_from(value)?
+            fn try_from(value: MachineSnapshotPgJson<HW>) -> Result<Self, Self::Error> {
+                Machine::<MachineId, HW>::try_from(value)?
                     .try_into_subtype()
                     .map_err(|e| sqlx::Error::ColumnDecode {
                         index: "id".to_string(),
@@ -439,10 +441,10 @@ macro_rules! delegate_try_from_machine_snapshot_pg_json_impl {
     };
 }
 
-delegate_try_from_machine_snapshot_pg_json_impl!(HostMachine);
-delegate_try_from_machine_snapshot_pg_json_impl!(DpuMachine);
-delegate_try_from_machine_snapshot_pg_json_impl!(PredictedHostMachine);
-delegate_try_from_machine_snapshot_pg_json_impl!(StableHostMachine);
+delegate_try_from_machine_snapshot_pg_json_impl!(HostMachineId);
+delegate_try_from_machine_snapshot_pg_json_impl!(DpuMachineId);
+delegate_try_from_machine_snapshot_pg_json_impl!(PredictedHostMachineId);
+delegate_try_from_machine_snapshot_pg_json_impl!(StableHostMachineId);
 
 #[cfg(test)]
 mod tests {
@@ -450,6 +452,7 @@ mod tests {
     use carbide_test_support::{Case, Check, check_cases, check_values};
 
     use super::*;
+    use crate::machine::{AnyMachine, HostMachine};
     use crate::machine_boot_interface::MachineBootInterface;
     use crate::nic_firmware::NicFirmwareCardSelector;
     use crate::test_support::machine_snapshot::{host_machine_id, machine_snapshot_pg_json};

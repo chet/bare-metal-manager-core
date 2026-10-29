@@ -5,7 +5,8 @@
 
 use carbide_machine_controller::handler::is_bf4_dmi_product;
 use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId};
-use model::machine::DpuMachine;
+use model::hardware_info::DiscoveredHardware;
+use model::machine::Machine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::spx_multiplane::{MachineSpxMultiplane, MachineSpxMultiplaneObservation};
 use rpc::forge;
@@ -76,11 +77,11 @@ fn host_id(id: Option<MachineId>) -> Result<HostMachineId, CarbideError> {
 
 /// A host's declared CX9 interfaces define Astra participation; only its BF4 DPUs
 /// receive that configuration. Missing local logical names are agent errors, not exclusions.
-pub(super) fn is_bf4_dpu(dpu: &DpuMachine) -> bool {
+pub(super) fn is_bf4_dpu<HW: DiscoveredHardware>(dpu: &Machine<DpuMachineId, HW>) -> bool {
     dpu.status
         .hardware_info
         .as_ref()
-        .and_then(|hardware| hardware.dmi_data.as_ref())
+        .and_then(|hardware| hardware.dmi_data())
         .is_some_and(|dmi| is_bf4_dmi_product(&dmi.product_name))
 }
 

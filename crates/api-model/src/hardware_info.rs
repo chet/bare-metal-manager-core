@@ -57,6 +57,26 @@ pub struct HardwareInfo {
     pub tpm_description: Option<TpmDescription>,
 }
 
+/// HardwareIdentity is the part of a machine's discovered hardware that
+/// identifies its platform and network devices: CPU architecture, NICs, TPM
+/// endorsement certificate, DPU identity, and DMI data.
+///
+/// It decodes from the same stored discovery `Info` object as [`HardwareInfo`]
+/// and skips everything else. CPU, GPU, memory, block, NVMe, and InfiniBand
+/// inventory are neither held nor decoded, so reads that only need identity
+/// (like DPU network configuration) don't pay for them.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct HardwareIdentity {
+    #[serde(default)]
+    pub network_interfaces: Vec<NetworkInterface>,
+    pub machine_type: CpuArchitecture,
+    #[serde(default)]
+    pub dmi_data: Option<DmiData>,
+    pub tpm_ek_certificate: Option<TpmEkCertificate>,
+    #[serde(default)]
+    pub dpu_info: Option<DpuData>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkInterface {
     #[serde(deserialize_with = "carbide_network::deserialize_mlx_mac")]
@@ -477,6 +497,73 @@ impl HardwareInfo {
     }
 }
 
+/// DiscoveredHardware reads the identity facts that every form of discovered
+/// hardware holds, so helpers that only need identity serve both full
+/// snapshots ([`HardwareInfo`]) and identity projections ([`HardwareIdentity`]).
+pub trait DiscoveredHardware {
+    fn machine_type(&self) -> CpuArchitecture;
+    fn network_interfaces(&self) -> &[NetworkInterface];
+    fn tpm_ek_certificate(&self) -> Option<&TpmEkCertificate>;
+    fn dpu_info(&self) -> Option<&DpuData>;
+    fn dmi_data(&self) -> Option<&DmiData>;
+}
+
+impl DiscoveredHardware for HardwareInfo {
+    fn machine_type(&self) -> CpuArchitecture {
+        self.machine_type
+    }
+
+    fn network_interfaces(&self) -> &[NetworkInterface] {
+        &self.network_interfaces
+    }
+
+    fn tpm_ek_certificate(&self) -> Option<&TpmEkCertificate> {
+        self.tpm_ek_certificate.as_ref()
+    }
+
+    fn dpu_info(&self) -> Option<&DpuData> {
+        self.dpu_info.as_ref()
+    }
+
+    fn dmi_data(&self) -> Option<&DmiData> {
+        self.dmi_data.as_ref()
+    }
+}
+
+impl DiscoveredHardware for HardwareIdentity {
+    fn machine_type(&self) -> CpuArchitecture {
+        self.machine_type
+    }
+
+    fn network_interfaces(&self) -> &[NetworkInterface] {
+        &self.network_interfaces
+    }
+
+    fn tpm_ek_certificate(&self) -> Option<&TpmEkCertificate> {
+        self.tpm_ek_certificate.as_ref()
+    }
+
+    fn dpu_info(&self) -> Option<&DpuData> {
+        self.dpu_info.as_ref()
+    }
+
+    fn dmi_data(&self) -> Option<&DmiData> {
+        self.dmi_data.as_ref()
+    }
+}
+
+impl From<&HardwareInfo> for HardwareIdentity {
+    fn from(info: &HardwareInfo) -> Self {
+        Self {
+            network_interfaces: info.network_interfaces.clone(),
+            machine_type: info.machine_type,
+            dmi_data: info.dmi_data.clone(),
+            tpm_ek_certificate: info.tpm_ek_certificate.clone(),
+            dpu_info: info.dpu_info.clone(),
+        }
+    }
+}
+
 /// Substrings matched against GPU `name` or DMI `product_name` to identify MNNVL-capable hardware.
 pub const MNNVL_KNOWN_GPU_NAMES: &[&str] = &["GB200", "GB300", "VR NVL"];
 
@@ -594,6 +681,30 @@ mod tests {
     const DPU_INFO_JSON: &[u8] = include_bytes!("hardware_info/test_data/dpu_info.json");
     const DPU_BF3_INFO_JSON: &[u8] = include_bytes!("hardware_info/test_data/dpu_bf3_info.json");
     const X86_INFO_JSON: &[u8] = include_bytes!("hardware_info/test_data/x86_info.json");
+
+    #[test]
+    fn hardware_identity_decodes_the_identity_of_stored_info() {
+        for fixture in [X86_INFO_JSON, DPU_INFO_JSON, DPU_BF3_INFO_JSON] {
+            let mut info: HardwareInfo = serde_json::from_slice(fixture).unwrap();
+            info.tpm_ek_certificate = Some(TpmEkCertificate::from(vec![0x30, 0x82, 0x01]));
+            let stored = serde_json::to_vec(&info).unwrap();
+
+            let identity: HardwareIdentity = serde_json::from_slice(&stored).unwrap();
+
+            assert_eq!(identity, HardwareIdentity::from(&info));
+        }
+    }
+
+    #[test]
+    fn hardware_identity_skips_inventory_the_full_decode_rejects() {
+        let mut stored: serde_json::Value = serde_json::from_slice(X86_INFO_JSON).unwrap();
+        stored["memory_devices"] = serde_json::json!("not a device list");
+
+        assert!(serde_json::from_value::<HardwareInfo>(stored.clone()).is_err());
+        let identity: HardwareIdentity = serde_json::from_value(stored).unwrap();
+        let info: HardwareInfo = serde_json::from_slice(X86_INFO_JSON).unwrap();
+        assert_eq!(identity, HardwareIdentity::from(&info));
+    }
 
     /// Pre-NMX-C rows stored `nvlink_info` without `chassis_serial` (and GPUs carried `nmx_m_id`).
     #[test]

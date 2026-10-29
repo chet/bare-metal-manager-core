@@ -27,6 +27,8 @@ static MANAGED_HOST_HISTORY_JOIN_SNIPPET: &str =
 static MACHINE_SNAPSHOT_HISTORY_JOIN_SNIPPET: &str =
     include_str!("sql/machine_snapshot_history_join.snippet");
 static HISTORY_SELECT_SNIPPET: &str = include_str!("sql/history_select.snippet");
+static TOPOLOGY_FIELD_SNIPPET: &str = include_str!("sql/topology_field.snippet");
+static TOPOLOGY_IDENTITY_FIELD_SNIPPET: &str = include_str!("sql/topology_identity_field.snippet");
 
 fn replace_sql<F: Fn(&str) -> Option<&str>>(input: &str, f: F) -> String {
     input
@@ -48,6 +50,7 @@ lazy_static! {
             match line {
                 "__HISTORY_SELECT__" => Some(HISTORY_SELECT_SNIPPET),
                 "__HISTORY_JOIN__" => Some(MANAGED_HOST_HISTORY_JOIN_SNIPPET),
+                "__TOPOLOGY_FIELD__" => Some(TOPOLOGY_FIELD_SNIPPET),
                 default => Some(default),
             }
         });
@@ -55,9 +58,22 @@ lazy_static! {
         match line {
             "__HISTORY_SELECT__" => None,
             "__HISTORY_JOIN__" => None,
+            "__TOPOLOGY_FIELD__" => Some(TOPOLOGY_FIELD_SNIPPET),
             default => Some(default),
         }
     });
+    /// Managed hosts whose topology carries only the hardware identity fields:
+    /// the CPU, GPU, memory, block, NVMe, and InfiniBand inventory is removed
+    /// before the row is built.
+    pub static ref MANAGED_HOST_IDENTITIES_NO_HISTORY: String =
+        replace_sql(MANAGED_HOSTS_TEMPLATE, |line| {
+            match line {
+                "__HISTORY_SELECT__" => None,
+                "__HISTORY_JOIN__" => None,
+                "__TOPOLOGY_FIELD__" => Some(TOPOLOGY_IDENTITY_FIELD_SNIPPET),
+                default => Some(default),
+            }
+        });
     pub static ref MACHINE_SNAPSHOTS_WITH_HISTORY: String =
         replace_sql(MACHINE_SNAPSHOTS_TEMPLATE, |line| {
             match line {

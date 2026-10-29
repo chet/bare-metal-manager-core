@@ -36,6 +36,7 @@ use duration_str::deserialize_duration_chrono;
 use health_report::HealthReport;
 use json::MachineSnapshotPgJson;
 use mac_address::MacAddress;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
 use sqlx::postgres::PgRow;
 use sqlx::{Column, FromRow, Row};
@@ -53,6 +54,7 @@ use crate::dpa_interface::{DpaInterface, DpaInterfaceType};
 use crate::errors::{ModelError, ModelResult};
 use crate::expected_machine::ExpectedMachineData;
 use crate::firmware::FirmwareComponentType;
+use crate::hardware_info::{DiscoveredHardware, HardwareInfo};
 use crate::instance::config::network::DeviceLocator;
 use crate::instance::snapshot::InstanceSnapshotPgJson;
 use crate::machine::capabilities::MachineCapabilitiesSet;
@@ -144,10 +146,14 @@ fn pending_boot_interface_config_version(
 }
 
 /// Represents the current state of `Machine`
+///
+/// `HW` is the discovered hardware each machine carries: the full
+/// [`HardwareInfo`] by default, or [`crate::hardware_info::HardwareIdentity`]
+/// for reads that only need identity, like DPU network configuration.
 #[derive(Debug, Clone)]
-pub struct ManagedHostStateSnapshot {
-    pub host_snapshot: HostMachine,
-    pub dpu_snapshots: Vec<DpuMachine>,
+pub struct ManagedHostStateSnapshot<HW = HardwareInfo> {
+    pub host_snapshot: Machine<HostMachineId, HW>,
+    pub dpu_snapshots: Vec<Machine<DpuMachineId, HW>>,
     pub dpa_interface_snapshots: Vec<DpaInterface>,
     /// If there is an instance provisioned on top of the machine, this holds
     /// its state
@@ -160,16 +166,19 @@ pub struct ManagedHostStateSnapshot {
     pub rack_health_overrides: Option<HealthReportSources>,
 }
 
-impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
+impl<'r, HW> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot<HW>
+where
+    HW: DiscoveredHardware + DeserializeOwned,
+{
     fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
         #[derive(Deserialize)]
         struct RackHealthOverrides {
             json: HealthReportSources,
         }
 
-        let host_snapshot: sqlx::types::Json<MachineSnapshotPgJson> =
+        let host_snapshot: sqlx::types::Json<MachineSnapshotPgJson<HW>> =
             row.try_get("host_snapshot")?;
-        let dpu_snapshots: sqlx::types::Json<Vec<Option<MachineSnapshotPgJson>>> =
+        let dpu_snapshots: sqlx::types::Json<Vec<Option<MachineSnapshotPgJson<HW>>>> =
             row.try_get("dpu_snapshots")?;
         let rack_health_overrides: sqlx::types::Json<Vec<Option<RackHealthOverrides>>> =
             row.try_get("rack_health_overrides")?;
@@ -186,9 +195,9 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
                 None
             };
 
-        let host_snapshot: HostMachine = host_snapshot.0.try_into()?;
+        let host_snapshot: Machine<HostMachineId, HW> = host_snapshot.0.try_into()?;
 
-        let dpu_snapshots: Vec<DpuMachine> = dpu_snapshots
+        let dpu_snapshots: Vec<Machine<DpuMachineId, HW>> = dpu_snapshots
             .0
             .into_iter()
             .flatten()
@@ -394,7 +403,7 @@ pub fn pick_boot_prediction(
     }
 }
 
-impl ManagedHostStateSnapshot {
+impl<HW: DiscoveredHardware> ManagedHostStateSnapshot<HW> {
     /// Returns `true` if this managed host has at least one DPU snapshot
     /// attached -- i.e. a DPU we actively manage as a `Machine`.
     ///
@@ -798,7 +807,7 @@ impl ManagedHostStateSnapshot {
             .status
             .hardware_info
             .iter()
-            .flat_map(|hi| &hi.network_interfaces)
+            .flat_map(|hi| hi.network_interfaces())
             .map(|interface| {
                 (
                     interface.mac_address,
@@ -855,17 +864,17 @@ impl ManagedHostStateSnapshot {
 /// Orders DPUs by the host PCI slot of their factory MAC. DPUs without a slot
 /// come next, then DPUs without a factory MAC. The order is total, so sorting
 /// stays valid when hardware info is not loaded.
-fn compare_dpus(
-    lhs: &DpuMachine,
-    rhs: &DpuMachine,
+fn compare_dpus<HW: DiscoveredHardware>(
+    lhs: &Machine<DpuMachineId, HW>,
+    rhs: &Machine<DpuMachineId, HW>,
     mac_pci: &HashMap<MacAddress, Option<&str>>,
 ) -> Ordering {
-    let sort_key = |dpu: &DpuMachine| {
+    let sort_key = |dpu: &Machine<DpuMachineId, HW>| {
         let mac: Option<MacAddress> = dpu
             .status
             .hardware_info
             .as_ref()
-            .and_then(|hi| hi.dpu_info.as_ref())
+            .and_then(|hi| hi.dpu_info())
             .and_then(|di| di.factory_mac_address.parse().ok());
         let slot = mac.and_then(|mac| mac_pci.get(&mac).copied().flatten());
         (mac.is_none(), slot.is_none(), slot)
@@ -919,8 +928,11 @@ pub type HostMachine = Machine<HostMachineId>;
 pub type StableHostMachine = Machine<StableHostMachineId>;
 
 /// A machine is a standalone system that performs network booting via normal DHCP processes.
+///
+/// `HW` is its discovered hardware: the full [`HardwareInfo`] by default, or a
+/// narrower decode such as [`crate::hardware_info::HardwareIdentity`].
 #[derive(Debug, Clone)]
-pub struct Machine<ID: MachineIdSubtypeTrait> {
+pub struct Machine<ID: MachineIdSubtypeTrait, HW = HardwareInfo> {
     /// The ID of the machine, this is an internal identifier in the database that's unique for
     /// all machines managed by this instance of carbide.
     pub id: ID,
@@ -960,7 +972,7 @@ pub struct Machine<ID: MachineIdSubtypeTrait> {
     pub config: MachineConfig,
 
     /// System-observed state.
-    pub status: MachineStatus,
+    pub status: MachineStatus<HW>,
 
     /// All health report sources
     pub health_reports: HealthReportSources,
@@ -1045,9 +1057,9 @@ pub struct Machine<ID: MachineIdSubtypeTrait> {
     pub manual_firmware_upgrade_completed: Option<DateTime<Utc>>,
 }
 
-impl<ID: MachineIdSubtypeTrait> Machine<ID> {
+impl<ID: MachineIdSubtypeTrait, HW> Machine<ID, HW> {
     /// Reconstruct this machine into type with a different ID. Should be an efficient memcpy
-    fn with_id<NewID>(self, new_id: NewID) -> Machine<NewID>
+    fn with_id<NewID>(self, new_id: NewID) -> Machine<NewID, HW>
     where
         NewID: MachineIdSubtypeTrait,
     {
@@ -1090,7 +1102,7 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
 
     /// Converts this machine to a narrower ID when its ID has the required kind. (so AnyMachine to
     /// DpuMachine, etc)
-    pub fn try_into_subtype<NewID>(self) -> Result<Machine<NewID>, InvalidMachineType>
+    pub fn try_into_subtype<NewID>(self) -> Result<Machine<NewID, HW>, InvalidMachineType>
     where
         NewID: MachineIdSubtypeTrait,
     {
@@ -1099,7 +1111,7 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
     }
 
     /// Converts this machine to a compatible, broader ID subtype (so DpuMachine to AnyMachine, etc)
-    pub fn into_subtype<NewID>(self) -> Machine<NewID>
+    pub fn into_subtype<NewID>(self) -> Machine<NewID, HW>
     where
         NewID: MachineIdSubtypeTrait + From<ID>,
     {
@@ -1191,12 +1203,6 @@ where
 }
 
 impl<ID: MachineIdSubtypeTrait> Machine<ID> {
-    /// Returns whether the Machine is a DPU, based on the HardwareInfo that
-    /// was available when the Machine was discovered
-    pub fn is_dpu(&self) -> bool {
-        self.id.machine_type().is_dpu()
-    }
-
     pub fn bmc_vendor(&self) -> bmc_vendor::BMCVendor {
         match self.status.hardware_info.as_ref() {
             Some(hw) => hw.bmc_vendor(),
@@ -1211,6 +1217,25 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
     /// so the UEFI setup and rotation flows don't special-case Dell inline.
     pub fn needs_bmc_unlock_for_uefi_setup(&self) -> bool {
         self.bmc_vendor().is_dell()
+    }
+
+    pub fn to_capabilities(&self) -> Option<MachineCapabilitiesSet> {
+        self.status.hardware_info.clone().map(|info| {
+            MachineCapabilitiesSet::from_hardware_info(
+                &info,
+                self.status.infiniband_status_observation.as_ref(),
+                self.associated_dpu_machine_ids(),
+                &self.status.interfaces,
+            )
+        })
+    }
+}
+
+impl<ID: MachineIdSubtypeTrait, HW: DiscoveredHardware> Machine<ID, HW> {
+    /// Returns whether the Machine is a DPU, based on the HardwareInfo that
+    /// was available when the Machine was discovered
+    pub fn is_dpu(&self) -> bool {
+        self.id.machine_type().is_dpu()
     }
 
     /// Does the forge-dpu-agent on this DPU need upgrading?
@@ -1348,17 +1373,6 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
         host_version == dpu_observed_version
     }
 
-    pub fn to_capabilities(&self) -> Option<MachineCapabilitiesSet> {
-        self.status.hardware_info.clone().map(|info| {
-            MachineCapabilitiesSet::from_hardware_info(
-                &info,
-                self.status.infiniband_status_observation.as_ref(),
-                self.associated_dpu_machine_ids(),
-                &self.status.interfaces,
-            )
-        })
-    }
-
     pub fn get_device_locator_for_dpu_id(
         &self,
         dpu_machine_id: &DpuMachineId,
@@ -1409,7 +1423,7 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
         // in order to ensure that the primary dpu is assigned a network config, it is configured first.
         // hardware_interfaces has the primary dpu as the first interface, self.status.interfaces may not.
         // iterate over hardware_interfaces and match it to self.status.interfaces using the mac address
-        for hardware_iface in &hardware_info.network_interfaces {
+        for hardware_iface in hardware_info.network_interfaces() {
             if let Some(pci) = &hardware_iface.pci_properties
                 && let Some(iface) = self
                     .status

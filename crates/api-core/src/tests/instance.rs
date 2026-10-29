@@ -55,6 +55,7 @@ use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::dpu_machine_update::DpuMachineUpdate;
 use model::expected_machine::ExpectedInterface;
 use model::extension_service::{ExtensionServiceLifecycleState, ExtensionServiceType};
+use model::hardware_info::HardwareIdentity;
 use model::instance::config::extension_services::InstanceExtensionServiceConfig;
 use model::instance::config::network::{
     DeviceLocator, InstanceInterfaceIpFamilyMode, InstanceInterfaceVpcSelection,
@@ -63,7 +64,7 @@ use model::instance::config::network::{
 };
 use model::machine::{
     AttestationMode, CleanupContext, CleanupState, FailureDetails, HostMachine, InstanceState,
-    MachineState, MachineValidatingState, ManagedHostState, MeasuringState,
+    LoadSnapshotOptions, MachineState, MachineValidatingState, ManagedHostState, MeasuringState,
     NetworkConfigUpdateState, SpdmMeasuringState, ValidationState,
 };
 use model::metadata::Metadata;
@@ -79,6 +80,7 @@ use rpc::forge::{
     AdminForceDeleteMachineRequest, DpuExtensionService, Issue, IssueCategory,
     ManagedHostQuarantineMode, TpmCaCert, TpmCaCertId,
 };
+use rpc::model::RpcTryFrom;
 use rpc::{InstanceReleaseRequest, Timestamp};
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -6478,6 +6480,94 @@ async fn test_network_update_waits_for_removed_dpu_admin_ack(pool: PgPool) {
     assert_eq!(segments.len(), 1);
     assert!(segments[0].is_marked_as_deleted());
     txn.commit().await.unwrap();
+}
+
+/// The DPU network-config path loads its host as `ManagedHostStateSnapshot<HardwareIdentity>`.
+/// For every machine it must hold the same identity facts (architecture, NICs, TPM endorsement
+/// certificate, DPU and DMI identity) in the same DPU order as the full snapshot, so the instance
+/// served to each DPU, with its TPM certificate and per-DPU device mapping, is unchanged.
+#[crate::sqlx_test]
+async fn test_hardware_identity_snapshot_matches_full_snapshot(pool: PgPool) {
+    let fixture = create_auto_vpc_selection_fixture(pool).await;
+    let env = &fixture.env;
+    let mh = create_managed_host_multi_dpu(env, 2).await;
+    let mut network = dual_physical_network_config_with_vpc_prefixes(
+        fixture.lower_ipv4_prefix_id,
+        fixture.higher_ipv4_prefix_id,
+    );
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    for (interface, dpu_id) in network.interfaces.iter_mut().zip(&mh.dpu_ids) {
+        let locator = host.get_device_locator_for_dpu_id(dpu_id).unwrap();
+        interface.device = Some(locator.device);
+        interface.device_instance = locator.device_instance as u32;
+    }
+    txn.commit().await.unwrap();
+    mh.instance_builer(env)
+        .tenant_org(FIXTURE_TENANT_ORG_ID)
+        .network(network)
+        .build()
+        .await;
+
+    let host_health = env.api.runtime_config.host_health;
+    let mut txn = env.db_txn().await;
+    for dpu_id in &mh.dpu_ids {
+        let full = db::managed_host::load_snapshot(
+            txn.as_mut(),
+            dpu_id,
+            LoadSnapshotOptions::default().with_host_health(host_health),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let identity = db::managed_host::load_snapshot_with_hardware_identity(
+            txn.as_mut(),
+            dpu_id,
+            host_health,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            identity.host_snapshot.status.hardware_info,
+            full.host_snapshot
+                .status
+                .hardware_info
+                .as_ref()
+                .map(HardwareIdentity::from),
+        );
+        let identity_dpus = identity
+            .dpu_snapshots
+            .iter()
+            .map(|dpu| (dpu.id, dpu.status.hardware_info.clone()))
+            .collect::<Vec<_>>();
+        let full_dpus = full
+            .dpu_snapshots
+            .iter()
+            .map(|dpu| {
+                (
+                    dpu.id,
+                    dpu.status
+                        .hardware_info
+                        .as_ref()
+                        .map(HardwareIdentity::from),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(identity_dpus, full_dpus);
+        assert_eq!(identity_dpus.len(), 2);
+
+        let identity_instance = Option::<rpc::Instance>::rpc_try_from(identity).unwrap();
+        let full_instance = Option::<rpc::Instance>::rpc_try_from(full).unwrap();
+        assert!(
+            identity_instance
+                .as_ref()
+                .is_some_and(|instance| instance.tpm_ek_certificate.is_some()),
+            "the fixture host carries a TPM endorsement certificate"
+        );
+        assert_eq!(identity_instance, full_instance);
+    }
 }
 
 #[crate::sqlx_test]

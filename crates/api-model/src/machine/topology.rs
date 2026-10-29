@@ -25,10 +25,10 @@ use crate::hardware_info::HardwareInfo;
 
 #[derive(Debug, Deserialize, Serialize, Clone, carbide_macros::DbTable)]
 #[db_table(name = "machine_topologies")]
-pub struct MachineTopology {
+pub struct MachineTopology<HW = HardwareInfo> {
     pub machine_id: MachineId,
     /// Topology data that is stored in json format in the database column
-    pub topology: TopologyData,
+    pub topology: TopologyData<HW>,
     pub created: DateTime<Utc>,
     /// The updated field is used when bom_validation is enabled
     /// It stores the last time an inventory update was accepted from scout.
@@ -52,14 +52,17 @@ impl<'r> FromRow<'r, PgRow> for MachineTopology {
     }
 }
 
+/// DiscoveryData holds the hardware fetched during discovery. `HW` is
+/// [`HardwareInfo`] for the full record, or a narrower decode of the same stored
+/// object, like [`crate::hardware_info::HardwareIdentity`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiscoveryData {
+pub struct DiscoveryData<HW = HardwareInfo> {
     /// Stores the hardware information that was fetched during discovery
     /// **Note that this field is renamed to uppercase because
     /// that is how the originally utilized protobuf message looked in serialized
     /// format**
     #[serde(rename = "Info")]
-    pub info: HardwareInfo,
+    pub info: HW,
 }
 
 /// Describes the data format we store in the `topology` field of the `machine_topologies` table
@@ -68,9 +71,9 @@ pub struct DiscoveryData {
 /// of initially storing a protobuf message which also contained other data in this
 /// field. For backward compatibility we emulate this behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TopologyData {
+pub struct TopologyData<HW = HardwareInfo> {
     /// Stores the hardware information that was fetched during discovery
-    pub discovery_data: DiscoveryData,
+    pub discovery_data: DiscoveryData<HW>,
     /// The BMC information of the machine
     /// Note that this field is currently side-injected via the
     /// `crate::crate::db::ipmi::BmcMetaDataUpdateRequest::update_bmc_meta_data`
@@ -78,12 +81,12 @@ pub struct TopologyData {
     pub bmc_info: BmcInfo,
 }
 
-impl MachineTopology {
-    pub fn topology(&self) -> &TopologyData {
+impl<HW> MachineTopology<HW> {
+    pub fn topology(&self) -> &TopologyData<HW> {
         &self.topology
     }
 
-    pub fn into_topology(self) -> TopologyData {
+    pub fn into_topology(self) -> TopologyData<HW> {
         self.topology
     }
 

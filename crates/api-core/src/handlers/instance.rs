@@ -39,6 +39,7 @@ use health_report::{
 use itertools::Itertools as _;
 use model::ConfigValidationError;
 use model::dpa_interface::DpaSearchConfig;
+use model::hardware_info::DiscoveredHardware;
 use model::instance::config::InstanceConfig;
 use model::instance::config::extension_services::{
     InstanceExtensionServicesConfig, RequestedInstanceExtensionServicesConfig,
@@ -2235,8 +2236,8 @@ fn snapshot_to_instance(
 ///
 /// Conversion failures come from server-owned state, so they are internal
 /// errors rather than invalid client input.
-pub(super) fn snapshot_to_optional_instance(
-    snapshot: ManagedHostStateSnapshot,
+pub(super) fn snapshot_to_optional_instance<HW: DiscoveredHardware>(
+    snapshot: ManagedHostStateSnapshot<HW>,
 ) -> Result<Option<rpc::Instance>, CarbideError> {
     let machine_id = snapshot.host_snapshot.id;
     Option::<rpc::Instance>::rpc_try_from(snapshot).map_err(|error| {

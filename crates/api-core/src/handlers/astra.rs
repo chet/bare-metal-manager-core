@@ -27,6 +27,7 @@ use config_version::ConfigVersion;
 use db::ObjectColumnFilter;
 use mac_address::MacAddress;
 use model::dpa_interface::{DpaInterfaceType, DpaSearchConfig};
+use model::hardware_info::DiscoveredHardware;
 use model::instance::config::spx::SpxAttachmentType;
 use model::machine::ManagedHostStateSnapshot;
 use model::machine::spx::{MachineSpxAttachmentStatusObservation, MachineSpxStatusObservation};
@@ -50,9 +51,9 @@ use crate::api::Api;
 ///    Return None only when both declared ports and discovered Astra NICs are absent.
 /// 3) Is the host associated with the DPU an instance? If so, return asta_config based on spx_config in instance.
 /// 4) Otherwise, return astra_config with VNI set to 0 for each NIC.
-pub(super) async fn get_astra_config(
+pub(super) async fn get_astra_config<HW: DiscoveredHardware>(
     api: &Api,
-    snapshot: &ManagedHostStateSnapshot,
+    snapshot: &ManagedHostStateSnapshot<HW>,
     dpu_machine_id: DpuMachineId,
 ) -> Result<Option<AstraConfig>, Status> {
     if !api.runtime_config.is_ewethers_enabled() || !api.runtime_config.is_astra_enabled() {

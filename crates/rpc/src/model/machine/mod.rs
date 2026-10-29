@@ -23,6 +23,7 @@ use carbide_uuid::machine::{
 };
 use health_report::HealthReport;
 use model::errors::{ModelError, ModelResult};
+use model::hardware_info::DiscoveredHardware;
 use model::health::HealthReportSources;
 use model::machine::{
     Dpf, DpfState, DpuInfo, DpuInfoStatusObservation, DpuInitState, DpuOsOperationalState,
@@ -91,10 +92,10 @@ impl From<DpuInfo> for rpc::forge::DpuInfo {
     }
 }
 
-impl RpcTryFrom<ManagedHostStateSnapshot> for Option<rpc::Instance> {
+impl<HW: DiscoveredHardware> RpcTryFrom<ManagedHostStateSnapshot<HW>> for Option<rpc::Instance> {
     type Error = RpcDataConversionError;
 
-    fn rpc_try_from(mut snapshot: ManagedHostStateSnapshot) -> Result<Self, Self::Error> {
+    fn rpc_try_from(mut snapshot: ManagedHostStateSnapshot<HW>) -> Result<Self, Self::Error> {
         let Some(instance) = snapshot.instance.take() else {
             return Ok(None);
         };
@@ -165,10 +166,13 @@ impl RpcTryFrom<ManagedHostStateSnapshot> for Option<rpc::Instance> {
                 .version_string(),
             instance_type_id: instance.instance_type_id.map(|i| i.to_string()),
             metadata: Some(instance.metadata.into()),
-            tpm_ek_certificate: snapshot.host_snapshot.status.hardware_info.and_then(|hi| {
-                hi.tpm_ek_certificate
-                    .map(|cert| BASE64_STANDARD.encode(cert.into_bytes()))
-            }),
+            tpm_ek_certificate: snapshot
+                .host_snapshot
+                .status
+                .hardware_info
+                .as_ref()
+                .and_then(|hi| hi.tpm_ek_certificate())
+                .map(|cert| BASE64_STANDARD.encode(cert.as_bytes())),
             nvlink_config_version: instance.nvlink_config_version.version_string(),
         }))
     }

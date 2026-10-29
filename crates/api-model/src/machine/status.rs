@@ -38,11 +38,13 @@ use crate::sku::SkuStatus;
 ///
 /// Corresponds to `MachineStatus` in the protobuf.
 #[derive(Debug, Clone)]
-pub struct MachineStatus {
+pub struct MachineStatus<HW = HardwareInfo> {
     pub interfaces: Vec<MachineInterfaceSnapshot>,
     /// Latest persisted convergence status for the desired boot interface.
     pub boot_interface_status_observation: Option<BootInterfaceStatusObservation>,
-    pub hardware_info: Option<HardwareInfo>,
+    /// Discovered hardware: the full [`HardwareInfo`], or only its identity
+    /// in snapshots loaded as [`crate::hardware_info::HardwareIdentity`].
+    pub hardware_info: Option<HW>,
     pub bmc_info: BmcInfo,
     pub last_reboot_time: Option<DateTime<Utc>>,
     pub last_cleanup_time: Option<DateTime<Utc>>,

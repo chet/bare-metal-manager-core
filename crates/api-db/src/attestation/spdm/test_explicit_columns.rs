@@ -24,6 +24,7 @@ use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
 use model::attestation::spdm::SlotInfo;
 use model::bmc_info::BmcInfo;
+use model::hardware_info::HardwareInfo;
 use model::machine::topology::{DiscoveryData, TopologyData};
 use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use sqlx::Connection;
@@ -106,7 +107,7 @@ async fn spdm_snapshot_uses_topology_selected_bmc(
 
     let topology = TopologyData {
         discovery_data: DiscoveryData {
-            info: Default::default(),
+            info: HardwareInfo::default(),
         },
         bmc_info: BmcInfo {
             machine_interface_id: Some(selected_interface_id),
@@ -257,7 +258,7 @@ async fn exercise_snapshot(
     };
     let topology = TopologyData {
         discovery_data: DiscoveryData {
-            info: Default::default(),
+            info: HardwareInfo::default(),
         },
         bmc_info: BmcInfo {
             ip: Some("198.51.100.69".parse()?),
