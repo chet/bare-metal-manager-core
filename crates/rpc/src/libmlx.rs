@@ -17,6 +17,7 @@
 
 use std::str::FromStr;
 
+use carbide_libmlx_model::device::identity::{MlxDeviceIdentity, MlxDeviceIdentityError};
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
 use carbide_libmlx_model::firmware::FirmwareSpec;
 use carbide_libmlx_model::firmware::operation::{
@@ -33,13 +34,40 @@ use crate::protos::mlx_device::{
     FirmwareFlashReport as FirmwareFlashReportPb, FirmwareOperation as FirmwareOperationPb,
     FirmwareOperationPhase as FirmwareOperationPhasePb,
     FirmwareOperationState as FirmwareOperationStatePb, FirmwareSpec as FirmwareSpecPb,
-    MlxDeviceInfo as MlxDeviceInfoPb,
+    MlxDeviceInfo as MlxDeviceInfoPb, MlxDeviceSelector as MlxDeviceSelectorPb,
 };
 
 impl From<DpuNvConfigProfile> for DpuNvConfigProfilePb {
     fn from(profile: DpuNvConfigProfile) -> Self {
         match profile {
             DpuNvConfigProfile::Gb200B3240V1 => Self::Gb200B3240V1,
+        }
+    }
+}
+
+impl TryFrom<MlxDeviceSelectorPb> for MlxDeviceIdentity {
+    type Error = MlxDeviceIdentityError;
+
+    fn try_from(identity: MlxDeviceSelectorPb) -> Result<Self, Self::Error> {
+        use crate::protos::mlx_device::mlx_device_selector::Identity;
+
+        match identity.identity {
+            Some(Identity::BaseMac(mac_address)) => Self::from_mac_str(&mac_address),
+            Some(Identity::BaseGuid(guid)) => Self::Guid(guid).validate(),
+            None => Err(MlxDeviceIdentityError::MissingIdentity),
+        }
+    }
+}
+
+impl From<MlxDeviceIdentity> for MlxDeviceSelectorPb {
+    fn from(identity: MlxDeviceIdentity) -> Self {
+        use crate::protos::mlx_device::mlx_device_selector::Identity;
+
+        Self {
+            identity: Some(match identity {
+                MlxDeviceIdentity::Mac(mac_address) => Identity::BaseMac(mac_address.to_string()),
+                MlxDeviceIdentity::Guid(guid) => Identity::BaseGuid(guid),
+            }),
         }
     }
 }
@@ -267,6 +295,43 @@ mod test {
     use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
+
+    /// Shared wire identities must use the same strict selector validation as
+    /// Core, while keeping the MAC and opaque GUID variants distinct.
+    #[test]
+    fn device_identity_wire_conversion_validates_and_preserves_variants() {
+        use crate::protos::mlx_device::mlx_device_selector::Identity::{BaseGuid, BaseMac};
+
+        scenarios!(
+            run = |identity| {
+                MlxDeviceIdentity::try_from(MlxDeviceSelectorPb { identity })
+                    .map(|identity| MlxDeviceSelectorPb::from(identity).identity)
+            };
+            "MAC uses typed address formatting" {
+                Some(BaseMac("02abcdef0123".into())) =>
+                    Yields(Some(BaseMac("02:AB:CD:EF:01:23".into()))),
+            }
+            "GUID preserves exact spelling" {
+                Some(BaseGuid("opaque-Base_Guid".into())) =>
+                    Yields(Some(BaseGuid("opaque-Base_Guid".into()))),
+            }
+            "missing oneof is not a default selector" {
+                None => FailsWith(MlxDeviceIdentityError::MissingIdentity),
+            }
+            "wire MAC cannot bypass strict spelling" {
+                Some(BaseMac("+2:ab:cd:01:02:03".into())) =>
+                    FailsWith(MlxDeviceIdentityError::MalformedMac),
+            }
+            "wire MAC cannot bypass domain validation" {
+                Some(BaseMac("00:00:00:00:00:00".into())) =>
+                    FailsWith(MlxDeviceIdentityError::InvalidMac),
+            }
+            "wire GUID cannot bypass domain validation" {
+                Some(BaseGuid("--".into())) =>
+                    FailsWith(MlxDeviceIdentityError::InvalidGuid),
+            }
+        );
+    }
 
     #[test]
     fn test_firmware_spec_roundtrip() {

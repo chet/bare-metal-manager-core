@@ -274,7 +274,7 @@ async fn no_work_receipt_survives_restart_and_rejects_conflicting_reuse() {
             .unwrap(),
             receipt
         );
-        assert_eq!(fs::read(ledger_path).unwrap(), ledger);
+        assert_eq!(fs::read(&ledger_path).unwrap(), ledger);
         assert!(!fixture.join("invocations").exists());
         drop(client);
         restarted.stop();

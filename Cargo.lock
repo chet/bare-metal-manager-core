@@ -3372,6 +3372,7 @@ dependencies = [
  "carbide-host-support",
  "carbide-instrument",
  "carbide-libmlx",
+ "carbide-libmlx-model",
  "carbide-machine-validation",
  "carbide-rpc",
  "carbide-test-support",

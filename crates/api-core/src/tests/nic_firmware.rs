@@ -714,6 +714,7 @@ async fn machine_selection_is_exposed_resolved_and_cleared_with_changing_invento
     ]);
     let mut observation = MlxDeviceObservation {
         observed_at: "2026-10-12T00:00:00Z".parse().unwrap(),
+        received_at: None,
         devices: devices
             .into_iter()
             .map(|device| device.try_into().unwrap())
@@ -956,6 +957,7 @@ async fn card_selections_split_eight_devices_and_clear_to_machine_inheritance(po
         .collect();
     let observation = MlxDeviceObservation {
         observed_at: "2026-10-13T00:00:00Z".parse().unwrap(),
+        received_at: None,
         devices: devices
             .iter()
             .cloned()
@@ -1232,6 +1234,7 @@ async fn changed_inventory_reports_ambiguous_and_unmatched_card_selections(pool:
         .unwrap();
     let mut observation = MlxDeviceObservation {
         observed_at: "2026-10-13T00:00:00Z".parse().unwrap(),
+        received_at: None,
         devices: [
             MlxDeviceInfo {
                 pci_name: "01:00.0".into(),
@@ -1507,6 +1510,7 @@ async fn machine_selection_rejects_invalid_requests_without_changing_configurati
     let firmware = config.entries[0].firmware.as_ref().unwrap();
     let observation = MlxDeviceObservation {
         observed_at: "2026-10-13T00:00:00Z".parse().unwrap(),
+        received_at: None,
         devices: vec![
             MlxDeviceInfo {
                 pci_name: "01:00.0".into(),
@@ -1961,6 +1965,7 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
     });
     let observation = MlxDeviceObservation {
         observed_at: "2026-10-03T00:00:00Z".parse().unwrap(),
+        received_at: None,
         devices: devices
             .iter()
             .cloned()
@@ -1994,6 +1999,14 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
         },
     )
     .await;
+    // The accepted live report sets `received_at`; subsequent reads must keep it.
+    let saved_observation = db::machine::find_one(&env.pool, &host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .status
+        .mlx_device_observation
+        .unwrap();
     assert!(
         env.api
             .scout_stream_registry
@@ -2197,7 +2210,7 @@ async fn desired_nic_firmware_uses_stored_devices_and_live_profiles_without_scou
         .unwrap();
     assert_eq!(after.state.value, before.state.value);
     assert_eq!(after.state.version, before.state.version);
-    assert_eq!(after.status.mlx_device_observation, Some(observation));
+    assert_eq!(after.status.mlx_device_observation, Some(saved_observation));
     assert!(
         env.api
             .scout_stream_registry
@@ -2297,6 +2310,7 @@ async fn desired_nic_firmware_keeps_selections_and_profiles_in_one_snapshot(pool
         .unwrap();
     let observation = MlxDeviceObservation {
         observed_at: "2026-10-03T00:00:00Z".parse().unwrap(),
+        received_at: None,
         devices: vec![
             MlxDeviceInfo {
                 pci_name: "01:00.0".into(),

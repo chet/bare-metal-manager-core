@@ -171,6 +171,7 @@ pub(crate) async fn forge_agent_control(
 
     use rpc::forge_agent_control_response::Action;
 
+    let authenticated_machine_id = crate::auth::authenticated_machine_id(&request)?;
     let request = request.into_inner();
     let machine_id: MachineId = convert_and_log_machine_id(request.machine_id.as_ref())?;
 
@@ -215,6 +216,37 @@ pub(crate) async fn forge_agent_control(
         let state = host_machine.current_state();
 
         match state {
+            ManagedHostState::NicFirmwareUpdating { operation } => {
+                if authenticated_machine_id != Some(machine_id) {
+                    return Err(CarbideError::PermissionDeniedError(
+                        "NIC firmware actions require the authenticated host identity".into(),
+                    )
+                    .into());
+                }
+                // This phase was committed by the controller. Polling only
+                // renders its frozen request; it cannot create an admission.
+                let owner = db::instance::find_by_machine_id(&mut txn, &machine_id)
+                    .await
+                    .map_err(CarbideError::from)?;
+                let owner_is_current = operation.purpose.matches_owner(
+                    owner
+                        .as_ref()
+                        .map(|owner| (owner.id, owner.config_version, owner.deleted.is_some())),
+                );
+                // Deletion or a replacement generation stops new submissions,
+                // but observation must continue for work already authorized.
+                (
+                    super::nic_firmware_operation::control_action(
+                        api,
+                        host_machine.id,
+                        machine.current_version(),
+                        operation,
+                        owner_is_current,
+                    )
+                    .await?,
+                    Some(txn),
+                )
+            }
             ManagedHostState::HostInit {
                 machine_state: MachineState::Init,
             } => (Action::retry(), Some(txn)),
@@ -483,6 +515,27 @@ fn build_agent_control_response(
     action: fac::Action,
     capabilities: &[i32],
 ) -> Result<ForgeAgentControlResponse, CarbideError> {
+    let requires_firmware_recovery = match &action {
+        fac::Action::MlxAction(action) => action.device_actions.iter().any(|device| match &device
+            .command
+        {
+            Some(fac::mlx_device_action::Command::ObserveFirmwareUpdate(_))
+            | Some(fac::mlx_device_action::Command::ReconcileFirmwareAccess(_)) => true,
+            Some(fac::mlx_device_action::Command::UpdateFirmware(task)) => {
+                task.supervisor_instance_id.is_some() || task.expected_device.is_some()
+            }
+            _ => false,
+        }),
+        fac::Action::MlxDeviceInfoReport(_) => true,
+        _ => false,
+    };
+    if requires_firmware_recovery
+        && !capabilities.contains(&(rpc::ForgeAgentControlCapability::NicFirmwareUpdateV2 as i32))
+    {
+        return Err(CarbideError::FailedPrecondition(
+            "scout does not advertise NIC_FIRMWARE_UPDATE_V2".into(),
+        ));
+    }
     let requires_firmware_update = match &action {
         fac::Action::MlxAction(action) => action.device_actions.iter().any(|device| {
             matches!(
@@ -559,12 +612,41 @@ pub(crate) async fn reboot_completed(
 ) -> Result<Response<rpc::MachineRebootCompletedResponse>, Status> {
     log_request_data(&request);
 
+    let authenticated_machine_id = crate::auth::authenticated_machine_id(&request)?;
     let req = request.into_inner();
     let machine_id: MachineId = convert_and_log_machine_id(req.machine_id.as_ref())?;
+    if authenticated_machine_id.is_some_and(|authenticated| authenticated != machine_id) {
+        return Err(CarbideError::PermissionDeniedError(
+            "reboot report machine ID does not match the authenticated source".into(),
+        )
+        .into());
+    }
 
+    // Keep the state check and timestamp write under the same row lock. A report
+    // that read an earlier state must not bypass firmware activation's identity check.
     let (machine, mut txn) = api
-        .load_machine(&machine_id, MachineSearchConfig::default())
+        .load_machine(
+            &machine_id,
+            MachineSearchConfig {
+                for_update: true,
+                ..Default::default()
+            },
+        )
         .await?;
+
+    // Firmware activation uses this timestamp to leave Rebooting. Unbound
+    // simulator reports retain their legacy behavior outside that workflow,
+    // but cannot confirm a firmware activation for another host.
+    if matches!(
+        machine.current_state(),
+        ManagedHostState::NicFirmwareUpdating { .. }
+    ) && authenticated_machine_id != Some(machine_id)
+    {
+        return Err(CarbideError::PermissionDeniedError(
+            "NIC firmware activation reports require the authenticated host identity".into(),
+        )
+        .into());
+    }
 
     record_reboot_duration_metric(&api.metric_emitter, &machine);
 
@@ -634,6 +716,8 @@ mod tests {
                                 image_sha256: "ab".repeat(32),
                                 configuration_sha256: None,
                             }),
+                            supervisor_instance_id: None,
+                            expected_device: None,
                         },
                     )),
                 },
@@ -683,6 +767,68 @@ mod tests {
         assert_eq!(
             response.data.expect("legacy lock response data").pair,
             legacy_pairs
+        );
+    }
+
+    /// Recovery actions require the complete V2 contract; advertising the
+    /// original checked-burn capability alone must not enable newer commands.
+    #[test]
+    fn firmware_recovery_actions_require_v2() {
+        use carbide_test_support::Outcome::*;
+        use carbide_test_support::scenarios;
+
+        let device_action = |command| {
+            fac::Action::MlxAction(fac::MlxAction {
+                device_actions: vec![fac::MlxDeviceAction {
+                    pci_name: "0000:01:00.0".into(),
+                    command: Some(command),
+                }],
+            })
+        };
+        let observe = device_action(fac::mlx_device_action::Command::ObserveFirmwareUpdate(
+            Default::default(),
+        ));
+        let access = device_action(fac::mlx_device_action::Command::ReconcileFirmwareAccess(
+            Default::default(),
+        ));
+        let inventory = fac::Action::MlxDeviceInfoReport(Default::default());
+        let guarded_update = device_action(fac::mlx_device_action::Command::UpdateFirmware(
+            fac::MlxDeviceUpdateFirmware {
+                supervisor_instance_id: Some("frozen-instance".into()),
+                ..Default::default()
+            },
+        ));
+        let selected_update = device_action(fac::mlx_device_action::Command::UpdateFirmware(
+            fac::MlxDeviceUpdateFirmware {
+                expected_device: Some(mlx_device::MlxDeviceSelector {
+                    identity: Some(mlx_device::mlx_device_selector::Identity::BaseGuid(
+                        "physical-card".into(),
+                    )),
+                }),
+                ..Default::default()
+            },
+        ));
+        let v1 = rpc::ForgeAgentControlCapability::NicFirmwareUpdateV1 as i32;
+        let v2 = rpc::ForgeAgentControlCapability::NicFirmwareUpdateV2 as i32;
+        scenarios!(
+            run = |(action, capabilities)| build_agent_control_response(action, &capabilities)
+                .map(|_| ()).map_err(drop);
+            "each new action requires its own capability" {
+                (observe.clone(), vec![v1]) => Fails,
+                (access.clone(), vec![v1]) => Fails,
+                (inventory.clone(), vec![v1]) => Fails,
+                // An instance guard and a physical selector independently need
+                // V2 even when a caller omits the other newer feature.
+                (guarded_update.clone(), vec![v1]) => Fails,
+                (selected_update.clone(), vec![v1]) => Fails,
+            }
+            "V2 permits each recovery action" {
+                (observe, vec![v2]) => Yields(()),
+                (access, vec![v2]) => Yields(()),
+                (inventory, vec![v2]) => Yields(()),
+                (guarded_update, vec![v1, v2]) => Yields(()),
+                (selected_update, vec![v1, v2]) => Yields(()),
+            }
         );
     }
 }

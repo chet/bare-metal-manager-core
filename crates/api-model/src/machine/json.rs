@@ -77,6 +77,9 @@ pub struct MachineSnapshotPgJson {
     pub spx_multiplane_status: Option<MachineSpxMultiplaneStatus>,
     /// Latest complete MLX collection stored on the machine, if one exists.
     pub mlx_device_observation: Option<MlxDeviceObservation>,
+    /// Accepted baseline evidence; older rows and DPU projections omit it.
+    #[serde(default)]
+    pub nic_firmware_baseline: Option<super::nic_firmware::NicFirmwareBaseline>,
     #[serde(default)]
     pub extension_service_status_observations: InstanceExtensionServiceStatusObservationByType,
     pub controller_state_version: String,
@@ -390,6 +393,7 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
                 spx_status_observation: value.spx_status_observation,
                 spx_multiplane_status: value.spx_multiplane_status,
                 mlx_device_observation: value.mlx_device_observation,
+                nic_firmware_baseline: value.nic_firmware_baseline,
                 extension_service_status_observations: value.extension_service_status_observations,
                 slot_number: value.slot_number,
                 tray_index: value.tray_index,

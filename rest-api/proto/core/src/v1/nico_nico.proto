@@ -6121,6 +6121,11 @@ enum ForgeAgentControlCapability {
   // Supports immutable, digest-checked MlxDeviceUpdateFirmware workflows and
   // correlated firmware_update_result observations.
   NIC_FIRMWARE_UPDATE_V1 = 1;
+  // Also supports immutable-request observation, physical-card identity checks,
+  // access reconciliation, and ordinary inventory refresh. Core observes first,
+  // saves the supervisor instance, and preserves it on submission retries;
+  // a replacement instance cannot authorize replay.
+  NIC_FIRMWARE_UPDATE_V2 = 2;
 }
 
 message ForgeAgentControlRequest {
@@ -6212,6 +6217,12 @@ message ForgeAgentControlResponse {
       // Whole NIC firmware workflow with immutable identity and checked inputs.
       // Requires NIC_FIRMWARE_UPDATE_V1; never projected into legacy JSON.
       MlxDeviceUpdateFirmware update_firmware = 8;
+      // Read an existing receipt, or identify the serving instance when absent.
+      // Requires NIC_FIRMWARE_UPDATE_V2; never submits or resumes firmware work.
+      MlxDeviceObserveFirmwareUpdate observe_firmware_update = 9;
+      // Version-bound access status/change for an admitted NIC workflow.
+      // Requires NIC_FIRMWARE_UPDATE_V2; never projected into legacy JSON.
+      MlxDeviceReconcileFirmwareAccess reconcile_firmware_access = 10;
     }
   }
 
@@ -6272,6 +6283,50 @@ message ForgeAgentControlResponse {
     // Required expected bytes, checked after supervisor-owned staging and before
     // configuration or burn. A configuration digest is required iff configured.
     mlx_device.FirmwareArtifactDigests expected_digests = 4;
+    // Instance ID captured from a prior missing-receipt observation. V2 Core
+    // producers must set this and never replace it after submission uncertainty.
+    // An existing matching receipt remains readable after supervisor restart;
+    // new admission requires this exact instance. Omission retains V1 behavior
+    // only for older Core callers, which must not rely on safe replay after
+    // losing the runtime journal. Empty and malformed present IDs are invalid.
+    optional string supervisor_instance_id = 5;
+    // Required for V2 producers. Checked under the supervisor's host claim
+    // before mutation; omission retains the V1 locator-only contract.
+    mlx_device.MlxDeviceSelector expected_device = 6;
+  }
+
+  // Observe one workflow without submitting, resuming, or probing the card.
+  // A missing receipt reports the current supervisor instance, not proof that
+  // another instance never executed the operation. Core may freeze that ID only
+  // before its first submission. Responses use MlxDeviceUpdateFirmwareResult.
+  message MlxDeviceObserveFirmwareUpdate {
+    // Required original operation ID, with the same syntax and reserved-prefix
+    // rule as MlxDeviceUpdateFirmware.operation_id.
+    string operation_id = 1;
+    // Required original whole-workflow token, with the same syntax as operation_id.
+    string phase_id = 2;
+    // The original immutable request. Observation checks these inputs against
+    // the saved journal entry and rejects conflicts without admitting work.
+    mlx_device.FirmwareFlasherProfile profile = 3;
+    mlx_device.FirmwareArtifactDigests expected_digests = 4;
+    mlx_device.MlxDeviceSelector expected_device = 5;
+  }
+
+  // Reconcile access for the current committed machine-controller revision.
+  // A change acknowledgment is not observed status; Core requests a separate
+  // status read at a new revision before advancing. The outer pci_name and
+  // inner device_id must be the same full lowercase PCI BDF.
+  message MlxDeviceReconcileFirmwareAccess {
+    // Full opaque controller-state version, echoed unchanged in the result.
+    string controller_state_version = 1;
+    // Required physical identity, checked before status or mutation under one
+    // direct-access claim. A device replacement must never inherit the action.
+    mlx_device.MlxDeviceSelector expected_device = 2;
+    oneof request {
+      mlx_device.MlxDeviceLockdownStatusRequest status = 3;
+      mlx_device.MlxDeviceLockdownLockRequest lock = 4;
+      mlx_device.MlxDeviceLockdownUnlockRequest unlock = 5;
+    }
   }
 
   message FirmwareUpgrade {
@@ -6290,6 +6345,10 @@ message ForgeAgentControlResponse {
     MachineValidation machine_validation = 10;
     MlxAction mlx_action = 11;
     FirmwareUpgrade firmware_upgrade = 12;
+    // Requires NIC_FIRMWARE_UPDATE_V2. Filters must be absent. Scout collects
+    // current whole-host inventory and uses ordinary PublishMlxDeviceReport;
+    // the inventory has no firmware-attempt correlation token.
+    mlx_device.MlxDeviceInfoReportRequest mlx_device_info_report = 13;
   }
 }
 

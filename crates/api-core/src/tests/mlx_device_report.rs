@@ -134,10 +134,10 @@ async fn firmware_test_card(
     card
 }
 
-/// Generic receipt publication must fail visibly even when the DPA route is
-/// disabled; success would incorrectly acknowledge durable Core ingestion.
+/// A delayed generic receipt after the host has left firmware work is ignored
+/// without creating a legacy DPA record, even when the DPA route is disabled.
 #[crate::sqlx_test]
-async fn firmware_update_result_is_not_acknowledged_without_dpa(pool: sqlx::PgPool) {
+async fn firmware_update_result_without_active_operation_is_ignored(pool: sqlx::PgPool) {
     let mut config = get_config();
     config.ewethers_config = None;
     let env = create_test_env_with_overrides(
@@ -153,8 +153,11 @@ async fn firmware_update_result_is_not_acknowledged_without_dpa(pool: sqlx::PgPo
     let machine_id: MachineId = host_id.into();
     assert!(!env.api.runtime_config.is_svpc_enabled());
 
-    let error = env
-        .api
+    let before = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    env.api
         .publish_mlx_observation_report(machine_request(
             PublishMlxObservationReportRequest {
                 report: Some(MlxObservationReport {
@@ -166,10 +169,13 @@ async fn firmware_update_result_is_not_acknowledged_without_dpa(pool: sqlx::PgPo
             machine_id,
         ))
         .await
-        .unwrap_err();
-
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-    assert!(error.message().contains("result ingestion is not enabled"));
+        .unwrap();
+    let after = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.state.value, before.state.value);
+    assert_eq!(after.state.version, before.state.version);
     assert!(
         db::dpa_interface::find_by_machine_id(&env.pool, host_id, DpaSearchConfig::default())
             .await
@@ -178,8 +184,8 @@ async fn firmware_update_result_is_not_acknowledged_without_dpa(pool: sqlx::PgPo
     );
 }
 
-/// A generic result must be classified before DPA merging, even when it uses
-/// a real DPA attempt ID and follows an otherwise acceptable legacy update.
+/// Malformed generic evidence rejects the batch before an earlier legacy
+/// observation can update a DPA record.
 #[crate::sqlx_test]
 async fn firmware_update_result_rejects_batch_before_dpa_writes(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
@@ -196,8 +202,8 @@ async fn firmware_update_result_rejects_batch_before_dpa_writes(pool: sqlx::PgPo
                 report: Some(MlxObservationReport {
                     machine_id: Some(machine_id),
                     observations: vec![
-                        // An acceptable DPA update earlier in the batch must
-                        // not be committed when generic ingestion is rejected.
+                        // The earlier valid legacy item must not be committed
+                        // when another item combines incompatible contracts.
                         MlxObservation {
                             device_info: Some(MlxDeviceInfo {
                                 base_mac: before.mac_address.to_string(),
@@ -207,7 +213,10 @@ async fn firmware_update_result_rejects_batch_before_dpa_writes(pool: sqlx::PgPo
                             profile_name: Some("must-not-be-saved".into()),
                             ..Default::default()
                         },
-                        firmware_update_observation(&operation_id),
+                        MlxObservation {
+                            profile_name: Some("invalid-generic-profile".into()),
+                            ..firmware_update_observation(&operation_id)
+                        },
                     ],
                     ..Default::default()
                 }),
@@ -217,7 +226,7 @@ async fn firmware_update_result_rejects_batch_before_dpa_writes(pool: sqlx::PgPo
         .await
         .unwrap_err();
 
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
     let stored =
         db::dpa_interface::find_by_machine_id(&env.pool, host_id, DpaSearchConfig::default())
             .await
@@ -1531,6 +1540,7 @@ async fn stored_device_identities_include_secondary_dpu_without_scout(pool: sqlx
     ];
     let stored = MlxDeviceObservation {
         observed_at: "2026-09-29T00:00:00Z".parse().unwrap(),
+        received_at: None,
         devices: devices
             .iter()
             .cloned()
@@ -1547,6 +1557,8 @@ async fn stored_device_identities_include_secondary_dpu_without_scout(pool: sqlx
     );
     drop(connection);
 
+    // The read must also preserve the database's receive timestamp.
+    let saved_observation = observation(&env.pool, host_machine_id).await.unwrap();
     let response = env
         .api
         .mlx_admin_show_device_identities(Request::new(request))
@@ -1575,7 +1587,7 @@ async fn stored_device_identities_include_secondary_dpu_without_scout(pool: sqlx
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after.status.mlx_device_observation, Some(stored));
+    assert_eq!(after.status.mlx_device_observation, Some(saved_observation));
     assert_eq!(after.state.value, machine.state.value);
     assert_eq!(after.state.version, machine.state.version);
     assert!(!env.api.scout_stream_registry.is_connected(machine_id).await);

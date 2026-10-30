@@ -64,6 +64,7 @@ mod machine_validation;
 mod metrics;
 mod mlx_access;
 mod mlx_device;
+mod mlx_firmware_access;
 mod nic_firmware_preflight;
 mod platform;
 mod register;
@@ -543,6 +544,9 @@ async fn handle_action(
             handle_mlxreport_action(config, machine_id, mlx_action).await;
             return Ok(());
         }
+        fac::Action::MlxDeviceInfoReport(request) => {
+            mlx_device::publish_requested_device_report(config, *machine_id, request).await?;
+        }
         fac::Action::FirmwareUpgrade(firmware_upgrade) => {
             handle_firmware_upgrade_action(config, machine_id, firmware_upgrade.task).await?;
         }
@@ -680,12 +684,32 @@ async fn collect_and_publish_mlx_observations<PublishFuture>(
                             Some(MlxObservation {
                                 firmware_update_result: Some(mlx_device::firmware_update_request_error(
                                     &action.pci_name,
-                                    &task,
+                                    &task.operation_id,
+                                    &task.phase_id,
                                     rpc::protos::mlx_device::MlxDeviceUpdateFirmwareErrorCode::Unavailable,
                                     "firmware supervisor configuration is invalid; no authoritative receipt is available",
                                 )),
                                 ..Default::default()
                             })
+                        }
+                        Some(fac::mlx_device_action::Command::ObserveFirmwareUpdate(task)) => {
+                            Some(MlxObservation {
+                                firmware_update_result: Some(mlx_device::firmware_update_request_error(
+                                    &action.pci_name,
+                                    &task.operation_id,
+                                    &task.phase_id,
+                                    rpc::protos::mlx_device::MlxDeviceUpdateFirmwareErrorCode::Unavailable,
+                                    "firmware supervisor configuration is invalid; no authoritative receipt is available",
+                                )),
+                                ..Default::default()
+                            })
+                        }
+                        Some(fac::mlx_device_action::Command::ReconcileFirmwareAccess(task)) => {
+                            Some(mlx_firmware_access::request_error(
+                                &action.pci_name,
+                                &task,
+                                "firmware supervisor configuration is invalid; hardware access was not attempted",
+                            ))
                         }
                         _ => None,
                     })
@@ -728,15 +752,33 @@ async fn collect_mlx_observations(
     };
 
     for device_action in commands {
-        // This command cannot become a DPA no-work decision. Submit the exact
-        // task on every delivery so the supervisor also checks conflicts when
-        // the caller reuses an operation ID with different immutable inputs.
-        if let Some(fac::mlx_device_action::Command::UpdateFirmware(task)) =
+        if let Some(fac::mlx_device_action::Command::ReconcileFirmwareAccess(task)) =
             device_action.command.as_ref()
         {
-            if let Some(result) =
-                mlx_device::update_firmware(&device_action.pci_name, task, supervisor_config).await
-            {
+            report.observations.push(
+                mlx_firmware_access::reconcile(&device_action.pci_name, task, supervisor_config)
+                    .await,
+            );
+            continue;
+        }
+        // Generic workflow receipts bypass device discovery and legacy DPA
+        // conversion. Observation never becomes a submission when absent.
+        let firmware_result = match device_action.command.as_ref() {
+            Some(fac::mlx_device_action::Command::UpdateFirmware(task)) => Some(
+                mlx_device::update_firmware(&device_action.pci_name, task, supervisor_config).await,
+            ),
+            Some(fac::mlx_device_action::Command::ObserveFirmwareUpdate(task)) => Some(
+                mlx_device::observe_firmware_update(
+                    &device_action.pci_name,
+                    task,
+                    supervisor_config,
+                )
+                .await,
+            ),
+            _ => None,
+        };
+        if let Some(result) = firmware_result {
+            if let Some(result) = result {
                 report.observations.push(MlxObservation {
                     firmware_update_result: Some(result),
                     ..Default::default()
@@ -1143,7 +1185,10 @@ async fn report_scout_error(
 fn agent_control_request(machine_id: &MachineId) -> rpc_forge::ForgeAgentControlRequest {
     rpc_forge::ForgeAgentControlRequest {
         machine_id: Some(*machine_id),
-        capabilities: vec![rpc_forge::ForgeAgentControlCapability::NicFirmwareUpdateV1.into()],
+        capabilities: vec![
+            rpc_forge::ForgeAgentControlCapability::NicFirmwareUpdateV1.into(),
+            rpc_forge::ForgeAgentControlCapability::NicFirmwareUpdateV2.into(),
+        ],
     }
 }
 
@@ -1345,6 +1390,7 @@ mod tests {
                 machine_id: Some(machine_id),
                 capabilities: vec![
                     rpc_forge::ForgeAgentControlCapability::NicFirmwareUpdateV1.into(),
+                    rpc_forge::ForgeAgentControlCapability::NicFirmwareUpdateV2.into(),
                 ],
             }
         );
@@ -1369,6 +1415,8 @@ mod tests {
         let task = fac::MlxDeviceUpdateFirmware {
             operation_id: "nic-update-config-failure".into(),
             phase_id: "firmware-phase".into(),
+            supervisor_instance_id: None,
+            expected_device: None,
             profile: Some(pb::FirmwareFlasherProfile {
                 firmware_spec: Some(pb::FirmwareSpec {
                     part_number: "test-part".into(),
@@ -1386,11 +1434,40 @@ mod tests {
                 configuration_sha256: None,
             }),
         };
+        let access_task = fac::MlxDeviceReconcileFirmwareAccess {
+            controller_state_version: "access-state-version".into(),
+            expected_device: Some(
+                carbide_libmlx_model::device::identity::MlxDeviceIdentity::Guid(
+                    "fixture-guid".into(),
+                )
+                .into(),
+            ),
+            request: Some(fac::mlx_device_reconcile_firmware_access::Request::Unlock(
+                pb::MlxDeviceLockdownUnlockRequest {
+                    device_id: pci_name.into(),
+                    key: "0123456789abcdef".into(),
+                },
+            )),
+        };
         let commands = vec![
             fac::MlxDeviceAction {
                 pci_name: pci_name.into(),
                 command: Some(fac::mlx_device_action::Command::UpdateFirmware(
                     task.clone(),
+                )),
+            },
+            // Observation still needs a correlated error when configuration
+            // prevents contacting the supervisor.
+            fac::MlxDeviceAction {
+                pci_name: pci_name.into(),
+                command: Some(fac::mlx_device_action::Command::ObserveFirmwareUpdate(
+                    fac::MlxDeviceObserveFirmwareUpdate {
+                        operation_id: "nic-observe-config-failure".into(),
+                        phase_id: task.phase_id.clone(),
+                        profile: task.profile.clone(),
+                        expected_digests: task.expected_digests.clone(),
+                        expected_device: task.expected_device.clone(),
+                    },
                 )),
             },
             // This command would probe hardware if invalid configuration fell
@@ -1400,6 +1477,12 @@ mod tests {
                 command: Some(fac::mlx_device_action::Command::Lock(fac::MlxDeviceLock {
                     key: "0123456789abcdef".into(),
                 })),
+            },
+            fac::MlxDeviceAction {
+                pci_name: pci_name.into(),
+                command: Some(fac::mlx_device_action::Command::ReconcileFirmwareAccess(
+                    access_task.clone(),
+                )),
             },
         ];
         let configuration_error = SupervisorLaunchError::Environment(VarError::NotUnicode(
@@ -1428,10 +1511,10 @@ mod tests {
         assert_eq!(report.machine_id, Some(machine_id));
         assert_eq!(
             report.observations,
-            vec![MlxObservation {
+            [task.operation_id.as_str(), "nic-observe-config-failure"].into_iter().map(|operation_id| MlxObservation {
                 firmware_update_result: Some(pb::MlxDeviceUpdateFirmwareResult {
-                    operation_id: task.operation_id,
-                    phase_id: task.phase_id,
+                    operation_id: operation_id.into(),
+                    phase_id: task.phase_id.clone(),
                     pci_name: pci_name.into(),
                     result: Some(UpdateResult::Error(pb::MlxDeviceUpdateFirmwareError {
                         code: pb::MlxDeviceUpdateFirmwareErrorCode::Unavailable.into(),
@@ -1439,7 +1522,18 @@ mod tests {
                     })),
                 }),
                 ..Default::default()
-            }]
+            }).chain([MlxObservation {
+                firmware_access_result: Some(pb::MlxDeviceFirmwareAccessResult {
+                    controller_state_version: access_task.controller_state_version,
+                    pci_name: pci_name.into(),
+                    expected_device: access_task.expected_device,
+                    result: Some(pb::mlx_device_firmware_access_result::Result::Error(pb::MlxDeviceStreamError {
+                        status: pb::MlxDeviceStreamErrorStatus::Internal.into(),
+                        message: "firmware supervisor configuration is invalid; hardware access was not attempted".into(),
+                    })),
+                }),
+                ..Default::default()
+            }]).collect::<Vec<_>>()
         );
         let configuration_failure = logs
             .iter()

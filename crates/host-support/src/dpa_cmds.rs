@@ -89,6 +89,18 @@ impl TryFrom<DpaCommandPb> for DpaCommand<'static> {
                         "UpdateFirmware requires the typed NIC firmware command path".to_string(),
                     );
                 }
+                Command::ObserveFirmwareUpdate(_) => {
+                    return Err(
+                        "ObserveFirmwareUpdate requires the typed NIC firmware command path"
+                            .to_string(),
+                    );
+                }
+                Command::ReconcileFirmwareAccess(_) => {
+                    return Err(
+                        "ReconcileFirmwareAccess requires the typed NIC firmware command path"
+                            .to_string(),
+                    );
+                }
             },
         })
     }
@@ -202,6 +214,8 @@ mod tests {
                 format!("apply_firmware_operation:{}", f.profile.is_some())
             }
             Some(C::UpdateFirmware(_)) => "update_firmware".to_string(),
+            Some(C::ObserveFirmwareUpdate(_)) => "observe_firmware_update".to_string(),
+            Some(C::ReconcileFirmwareAccess(_)) => "reconcile_firmware_access".to_string(),
         }
     }
 
@@ -297,6 +311,22 @@ mod tests {
                     ..Default::default()
                 }) => FailsWith(
                     "UpdateFirmware requires the typed NIC firmware command path".to_string()
+                ),
+            }
+
+            "observe_firmware_update cannot become a legacy DPA command" {
+                Command::ObserveFirmwareUpdate(fac::MlxDeviceObserveFirmwareUpdate {
+                    operation_id: "operation".into(),
+                    phase_id: "update:1".into(),
+                    ..Default::default()
+                }) => FailsWith(
+                    "ObserveFirmwareUpdate requires the typed NIC firmware command path".to_string()
+                ),
+            }
+
+            "reconcile_firmware_access cannot become a legacy DPA command" {
+                Command::ReconcileFirmwareAccess(Default::default()) => FailsWith(
+                    "ReconcileFirmwareAccess requires the typed NIC firmware command path".to_string()
                 ),
             }
 

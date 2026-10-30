@@ -25,8 +25,9 @@ use hyper_util::rt::TokioIo;
 use rpc::protos::firmware_supervisor::firmware_supervisor_client::FirmwareSupervisorClient as WireClient;
 use rpc::protos::firmware_supervisor::{
     CancelFirmwareOperationRequest, GetFirmwareOperationRequest, GetSupervisorStatusRequest,
-    GetSupervisorStatusResponse, ObserverExitBehavior as ObserverExitBehaviorPb,
-    SubmitFirmwareOperationRequest, SupervisorIdentity,
+    GetSupervisorStatusResponse, ObserveFirmwareOperationResponse, ObserveFirmwareUpdateRequest,
+    ObserverExitBehavior as ObserverExitBehaviorPb, SubmitFirmwareOperationRequest,
+    SupervisorIdentity, observe_firmware_operation_response,
 };
 use rpc::protos::mlx_device::FirmwareOperation as FirmwareOperationPb;
 use thiserror::Error;
@@ -36,18 +37,18 @@ use tower::service_fn;
 
 use crate::firmware::config::{FirmwareFlasherProfile, FirmwareUpdateContext};
 
-pub(super) const PROTOCOL_VERSION: u32 = 3;
+pub(super) const PROTOCOL_VERSION: u32 = 4;
 pub(super) const MESSAGE_LIMIT: usize = 128 * 1024;
 // Local admission and receipt reads are short operations. This cumulative bound
 // includes channel readiness and reconnection, not the firmware job's lifetime.
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The protocol, PCI slot, execution target, and boot served by one supervisor socket.
+/// The protocol, PCI slot, execution target, boot, and instance served by one socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SupervisorStatus {
-    /// Private protocol version: 3 supports checked submission and post-reset
-    /// verification retries. Versions 1 and 2 permit receipt reads and
-    /// cancellation, but not submission.
+    /// Private protocol version: 4 supports instance-guarded submission and
+    /// observation; 3 supports unguarded checked submission. Versions 1 and 2
+    /// permit receipt reads and cancellation, but not submission.
     pub protocol_version: u32,
     /// Normalized PCI slot `dddd:bb:ss`, not proof of physical-card
     /// identity or an independently isolated reset domain.
@@ -57,6 +58,25 @@ pub struct SupervisorStatus {
     /// Exact normalized full PCI BDF `dddd:bb:ss.f` used for tool execution.
     /// Sharing a slot does not permit silently targeting another function.
     pub execution_device: String,
+    /// Opaque token containing 1-256 printable nonspace ASCII bytes, generated
+    /// on service startup. Required on protocol 4; older peers may omit it.
+    /// A reconnect must not replace a caller's previously frozen admission token.
+    pub supervisor_instance_id: Option<String>,
+}
+
+/// `FirmwareOperationObservation` is a receipt lookup, never a request to execute.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FirmwareOperationObservation {
+    /// The saved receipt, including interrupted and terminal execution states.
+    Receipt(FirmwareOperation),
+    /// This service's readable journal has no receipt for the requested ID.
+    /// Only an initial observation may establish permission for new admission;
+    /// a replacement instance cannot refresh a token already frozen by a caller.
+    MissingReceipt {
+        /// Opaque token of the service that performed this lookup, containing
+        /// 1-256 printable nonspace ASCII bytes.
+        supervisor_instance_id: String,
+    },
 }
 
 /// An input, connection, or receipt failure; no error resolves an earlier submission.
@@ -138,8 +158,9 @@ impl FirmwareSupervisorClient {
     /// a durable no-work completion with `flashed=false`, still subject to
     /// predecessor and host mutation-claim checks. The server rejects conflicting
     /// reuse of an ID.
-    /// A lost response leaves acceptance uncertain;
-    /// resolve it with the same ID. `observer_exit_behavior` applies to the
+    /// A lost response leaves acceptance uncertain; read its receipt with the
+    /// same ID. An unguarded retry cannot prevent repetition after runtime state loss.
+    /// `observer_exit_behavior` applies to the
     /// submitting process's death, never to this RPC's connection or deadline.
     /// Local image, configuration, and SSH-key paths are resolved against the
     /// submitting process's current directory before request fingerprinting.
@@ -151,7 +172,7 @@ impl FirmwareSupervisorClient {
     /// uses the supervisor's `SSH_AUTH_SOCK`; host verification uses its
     /// default known-hosts file. Those environments are not forwarded per request.
     /// Protocols 1 and 2 permit receipt recovery only; every submission requires
-    /// protocol 3. Use [`Self::get`] or [`Self::cancel`] to reconcile existing
+    /// protocol 3 or 4. Use [`Self::get`] or [`Self::cancel`] to reconcile existing
     /// work before replacing an older daemon.
     pub async fn submit(
         &mut self,
@@ -159,7 +180,7 @@ impl FirmwareSupervisorClient {
         mut profile: Option<FirmwareFlasherProfile>,
         observer_exit_behavior: ObserverExitBehavior,
     ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
-        self.require_submission_protocol()?;
+        self.require_submission_protocol(None)?;
         if let Some(profile) = &mut profile {
             // Absolute inputs and remote URLs remain usable after the caller's
             // working directory is removed. With no directory available, any
@@ -178,16 +199,20 @@ impl FirmwareSupervisorClient {
             observer_exit_behavior: ObserverExitBehaviorPb::from(observer_exit_behavior).into(),
             expected_identity: Some(self.identity.clone().into()),
             update_context: None,
+            expected_supervisor_instance_id: None,
         };
         self.submit_request(request).await
     }
 
     /// `submit_update` admits or observes one digest-bound firmware workflow.
-    /// Every delivery must use this method, including repeated IDs, so changed
-    /// profile, artifact digests, or dispatch token conflict with accepted work.
+    /// Submission deliveries use this method or [`Self::submit_update_on_instance`],
+    /// so changed profile, artifact digests, or dispatch token conflict with
+    /// accepted work. Use the guarded method for automatic retries; this method
+    /// cannot prevent repetition after runtime state loss.
     /// The supervisor owns staging and checks both digests before mutation.
-    /// Only protocol 3 accepts checked work; older helpers remain readable and
-    /// cancellable but cannot silently fall back to unchecked execution.
+    /// Protocol 3 accepts checked work without a stable device selector;
+    /// `context.expected_device` requires protocol 4. Older helpers remain
+    /// readable and cancellable but cannot fall back to unchecked execution.
     ///
     /// [`FirmwareUpdateContext::validate`] checks the dispatch token, digest
     /// requirements, and unauthenticated HTTP(S) source policy before any RPC.
@@ -202,7 +227,55 @@ impl FirmwareSupervisorClient {
         context: FirmwareUpdateContext,
         observer_exit_behavior: ObserverExitBehavior,
     ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
-        self.require_submission_protocol()?;
+        self.submit_update_with_instance(
+            operation_id,
+            profile,
+            context,
+            observer_exit_behavior,
+            None,
+        )
+        .await
+    }
+
+    /// `submit_update_on_instance` guards [`Self::submit_update`] with the token
+    /// previously obtained from [`Self::observe_update`]. Requires protocol 4.
+    ///
+    /// The token contains 1-256 printable nonspace ASCII bytes and is preserved
+    /// across retries and reconnection.
+    /// A replacement service can return a matching existing receipt, but cannot
+    /// admit missing work. All profile and digest validation remains unchanged.
+    pub async fn submit_update_on_instance(
+        &mut self,
+        operation_id: &str,
+        profile: FirmwareFlasherProfile,
+        context: FirmwareUpdateContext,
+        observer_exit_behavior: ObserverExitBehavior,
+        expected_supervisor_instance_id: &str,
+    ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
+        self.submit_update_with_instance(
+            operation_id,
+            profile,
+            context,
+            observer_exit_behavior,
+            Some(expected_supervisor_instance_id),
+        )
+        .await
+    }
+
+    async fn submit_update_with_instance(
+        &mut self,
+        operation_id: &str,
+        profile: FirmwareFlasherProfile,
+        context: FirmwareUpdateContext,
+        observer_exit_behavior: ObserverExitBehavior,
+        expected_supervisor_instance_id: Option<&str>,
+    ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
+        self.require_submission_protocol(expected_supervisor_instance_id)?;
+        if context.expected_device.is_some() && self.identity.protocol_version < 4 {
+            return Err(FirmwareSupervisorClientError::UnsupportedProtocol(
+                self.identity.protocol_version,
+            ));
+        }
         context
             .validate(&profile)
             .map_err(|error| FirmwareSupervisorClientError::InvalidRequest(error.to_string()))?;
@@ -211,20 +284,31 @@ impl FirmwareSupervisorClient {
             profile: Some(profile.into()),
             observer_exit_behavior: ObserverExitBehaviorPb::from(observer_exit_behavior).into(),
             expected_identity: Some(self.identity.clone().into()),
-            update_context: Some(rpc::protos::firmware_supervisor::FirmwareUpdateContext {
-                phase_id: context.phase_id,
-                expected_digests: Some(context.expected_digests.into()),
-            }),
+            update_context: Some(context.into()),
+            expected_supervisor_instance_id: expected_supervisor_instance_id.map(str::to_owned),
         })
         .await
     }
 
-    fn require_submission_protocol(&self) -> Result<(), FirmwareSupervisorClientError> {
+    fn require_submission_protocol(
+        &self,
+        expected_supervisor_instance_id: Option<&str>,
+    ) -> Result<(), FirmwareSupervisorClientError> {
         // Protocol 1 ignores retry policy; protocols 1 and 2 ignore checked
-        // update context. Keep all admission on the matching helper version.
-        if self.identity.protocol_version != PROTOCOL_VERSION {
+        // update context. Protocol 3 supports both, but ignores the instance guard.
+        let minimum_version = if expected_supervisor_instance_id.is_some() {
+            4
+        } else {
+            3
+        };
+        if self.identity.protocol_version < minimum_version {
             return Err(FirmwareSupervisorClientError::UnsupportedProtocol(
                 self.identity.protocol_version,
+            ));
+        }
+        if expected_supervisor_instance_id.is_some_and(|id| !is_valid_supervisor_instance_id(id)) {
+            return Err(FirmwareSupervisorClientError::InvalidRequest(
+                "expected supervisor instance ID must contain 1..256 printable nonspace ASCII bytes".into(),
             ));
         }
         Ok(())
@@ -271,6 +355,49 @@ impl FirmwareSupervisorClient {
         .map_err(|_| FirmwareSupervisorClientError::Deadline)?
     }
 
+    /// `observe_update` reads a receipt only for the unchanged checked request.
+    /// Requires protocol 4. The supervisor validates the profile, context and
+    /// observer policy against its saved fingerprint; conflicting reuse returns
+    /// `AlreadyExists`. Absence returns an instance token without admitting work,
+    /// acquiring a mutation claim, probing hardware, or downloading artifacts.
+    /// The service returns absence and its token together, even after reconnect.
+    /// A failed or fenced journal is an error, not a missing receipt. This call
+    /// never resumes interrupted work. Its five-second cumulative deadline
+    /// includes channel readiness and reconnection, not the firmware job's lifetime.
+    pub async fn observe_update(
+        &mut self,
+        operation_id: &str,
+        profile: FirmwareFlasherProfile,
+        context: FirmwareUpdateContext,
+        observer_exit_behavior: ObserverExitBehavior,
+    ) -> Result<FirmwareOperationObservation, FirmwareSupervisorClientError> {
+        if self.identity.protocol_version < 4 {
+            return Err(FirmwareSupervisorClientError::UnsupportedProtocol(
+                self.identity.protocol_version,
+            ));
+        }
+        context
+            .validate(&profile)
+            .map_err(|error| FirmwareSupervisorClientError::InvalidRequest(error.to_string()))?;
+        tokio::time::timeout(RPC_TIMEOUT, async {
+            let response = self
+                .client
+                .observe_firmware_update(ObserveFirmwareUpdateRequest {
+                    operation_id: operation_id.into(),
+                    profile: Some(profile.into()),
+                    observer_exit_behavior: ObserverExitBehaviorPb::from(observer_exit_behavior)
+                        .into(),
+                    expected_identity: Some(self.identity.clone().into()),
+                    update_context: Some(context.into()),
+                })
+                .await?
+                .into_inner();
+            decode_observation(response, operation_id)
+        })
+        .await
+        .map_err(|_| FirmwareSupervisorClientError::Deadline)?
+    }
+
     /// Request a safe-boundary stop for an existing ID within five seconds.
     ///
     /// `operation_id` must contain 1-256 printable nonspace ASCII bytes; other
@@ -297,7 +424,7 @@ impl FirmwareSupervisorClient {
         .map_err(|_| FirmwareSupervisorClientError::Deadline)?
     }
 
-    /// Read validated protocol, slot, execution target, and boot identities within five seconds.
+    /// Read validated protocol, slot, execution target, boot, and instance within five seconds.
     pub async fn status(&mut self) -> Result<SupervisorStatus, FirmwareSupervisorClientError> {
         tokio::time::timeout(RPC_TIMEOUT, async {
             self.client
@@ -322,6 +449,16 @@ impl From<SupervisorStatus> for SupervisorIdentity {
     }
 }
 
+impl From<FirmwareUpdateContext> for rpc::protos::firmware_supervisor::FirmwareUpdateContext {
+    fn from(context: FirmwareUpdateContext) -> Self {
+        Self {
+            phase_id: context.phase_id,
+            expected_digests: Some(context.expected_digests.into()),
+            expected_device: context.expected_device.map(Into::into),
+        }
+    }
+}
+
 impl TryFrom<GetSupervisorStatusResponse> for SupervisorStatus {
     type Error = FirmwareSupervisorClientError;
 
@@ -340,12 +477,50 @@ impl TryFrom<GetSupervisorStatusResponse> for SupervisorStatus {
                     .to_string(),
             ));
         }
+        if response.protocol_version >= 4
+            && !is_valid_supervisor_instance_id(&response.supervisor_instance_id)
+        {
+            return Err(FirmwareSupervisorClientError::InvalidResponse(
+                "supervisor instance ID must contain 1..256 printable nonspace ASCII bytes".into(),
+            ));
+        }
         Ok(Self {
             protocol_version: response.protocol_version,
             device_identity: response.device_identity,
             boot_id: response.boot_id,
             execution_device: response.execution_device,
+            supervisor_instance_id: (!response.supervisor_instance_id.is_empty())
+                .then_some(response.supervisor_instance_id),
         })
+    }
+}
+
+fn is_valid_supervisor_instance_id(instance_id: &str) -> bool {
+    !instance_id.is_empty()
+        && instance_id.len() <= 256
+        && instance_id.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// Observation must identify either this operation or a usable admission token;
+/// a successful transport alone cannot establish that the journal was readable.
+fn decode_observation(
+    response: ObserveFirmwareOperationResponse,
+    operation_id: &str,
+) -> Result<FirmwareOperationObservation, FirmwareSupervisorClientError> {
+    match response.result {
+        Some(observe_firmware_operation_response::Result::Receipt(receipt)) => {
+            decode_operation(Some(receipt), operation_id).map(FirmwareOperationObservation::Receipt)
+        }
+        Some(observe_firmware_operation_response::Result::MissingReceipt(missing))
+            if is_valid_supervisor_instance_id(&missing.supervisor_instance_id) =>
+        {
+            Ok(FirmwareOperationObservation::MissingReceipt {
+                supervisor_instance_id: missing.supervisor_instance_id,
+            })
+        }
+        _ => Err(FirmwareSupervisorClientError::InvalidResponse(
+            "missing observation result or invalid supervisor instance ID".into(),
+        )),
     }
 }
 
@@ -380,10 +555,11 @@ mod tests {
     };
     use rpc::protos::firmware_supervisor::{
         CancelFirmwareOperationResponse, GetFirmwareOperationResponse,
-        SubmitFirmwareOperationResponse,
+        ObserveFirmwareOperationResponse, SubmitFirmwareOperationResponse,
     };
     use rpc::protos::mlx_device::{
-        FirmwareFlashReport, FirmwareOperationPhase, FirmwareOperationState,
+        FirmwareFlashReport, FirmwareOperationMissingReceipt, FirmwareOperationPhase,
+        FirmwareOperationState,
     };
     use tokio::net::UnixListener;
     use tokio::sync::watch;
@@ -391,6 +567,7 @@ mod tests {
     use tonic::{Request, Response, Status};
 
     use super::*;
+    use crate::firmware::config::FirmwareArtifactDigests;
 
     /// A protocol-1 peer exposes retained work and checks the cancellation
     /// identity without running firmware tools or accepting new operations.
@@ -424,6 +601,15 @@ mod tests {
             }))
         }
 
+        async fn observe_firmware_update(
+            &self,
+            _request: Request<ObserveFirmwareUpdateRequest>,
+        ) -> Result<Response<ObserveFirmwareOperationResponse>, Status> {
+            Err(Status::unimplemented(
+                "the predecessor cannot validate checked observations",
+            ))
+        }
+
         async fn cancel_firmware_operation(
             &self,
             request: Request<CancelFirmwareOperationRequest>,
@@ -452,12 +638,14 @@ mod tests {
                 device_identity: self.identity.device_identity.clone(),
                 boot_id: self.identity.boot_id.clone(),
                 execution_device: self.identity.execution_device.clone(),
+                supervisor_instance_id: String::new(),
             }))
         }
     }
 
     /// Upgrading the client must preserve recovery access to protocol-1 work,
     /// without sending it new requests whose retry policy it cannot honor.
+    /// Invalid guarded requests must also stop before reaching the transport.
     #[tokio::test]
     async fn predecessor_receipts_remain_accessible_without_new_admission() {
         let directory = tempfile::tempdir().expect("create socket directory");
@@ -528,6 +716,48 @@ mod tests {
                         .await,
                     Err(FirmwareSupervisorClientError::UnsupportedProtocol(1))
                 ));
+
+                // Reuse the counted transport to exercise the public guarded
+                // client path. This local v4 identity isolates guard validation
+                // from the already-proven predecessor protocol refusal.
+                let mut guarded_client = FirmwareSupervisorClient {
+                    client: client.client.clone(),
+                    identity: SupervisorStatus {
+                        protocol_version: PROTOCOL_VERSION,
+                        supervisor_instance_id: Some("instance".into()),
+                        ..client.identity.clone()
+                    },
+                };
+                let profile = FirmwareFlasherProfile::from_toml(
+                    r#"
+part_number = "part"
+psid = "psid"
+version = "version"
+firmware_url = "https://host/image.bin"
+"#,
+                )
+                .expect("parse valid checked profile");
+                let context = FirmwareUpdateContext {
+                    phase_id: "dispatch".into(),
+                    expected_digests: FirmwareArtifactDigests {
+                        image_sha256: [0; 32],
+                        configuration_sha256: None,
+                    },
+                    expected_device: None,
+                };
+                context.validate(&profile).expect("valid checked context");
+                assert!(matches!(
+                    guarded_client
+                        .submit_update_on_instance(
+                            "new-operation",
+                            profile,
+                            context,
+                            ObserverExitBehavior::Continue,
+                            "instance token",
+                        )
+                        .await,
+                    Err(FirmwareSupervisorClientError::InvalidRequest(_))
+                ));
                 assert_eq!(submissions.load(Ordering::Relaxed), 0);
                 shutdown.send(true).expect("stop predecessor fixture");
             })
@@ -574,49 +804,124 @@ mod tests {
             [
                 Check {
                     scenario: "the predecessor identity remains usable for receipt recovery",
-                    input: (1, "0000:03:00", "boot", "0000:03:00.1"),
+                    input: (1, "0000:03:00", "boot", "0000:03:00.1", ""),
                     expect: Some(SupervisorIdentity {
                         protocol_version: 1,
                         ..identity.clone()
                     }),
                 },
                 Check {
+                    scenario: "protocol 3 needs no instance token for unguarded submission",
+                    input: (3, "0000:03:00", "boot", "0000:03:00.1", ""),
+                    expect: Some(SupervisorIdentity {
+                        protocol_version: 3,
+                        ..identity.clone()
+                    }),
+                },
+                Check {
                     scenario: "the full function is retained in mutation identity",
-                    input: (PROTOCOL_VERSION, "0000:03:00", "boot", "0000:03:00.1"),
+                    input: (
+                        PROTOCOL_VERSION,
+                        "0000:03:00",
+                        "boot",
+                        "0000:03:00.1",
+                        "instance",
+                    ),
                     expect: Some(identity),
                 },
                 Check {
                     scenario: "an unsupported protocol cannot authorize execution",
-                    input: (PROTOCOL_VERSION + 1, "0000:03:00", "boot", "0000:03:00.1"),
+                    input: (
+                        PROTOCOL_VERSION + 1,
+                        "0000:03:00",
+                        "boot",
+                        "0000:03:00.1",
+                        "instance",
+                    ),
                     expect: None,
                 },
                 Check {
                     scenario: "a missing slot cannot authorize execution",
-                    input: (PROTOCOL_VERSION, "", "boot", "0000:03:00.1"),
+                    input: (PROTOCOL_VERSION, "", "boot", "0000:03:00.1", "instance"),
                     expect: None,
                 },
                 Check {
                     scenario: "a missing boot cannot authorize execution",
-                    input: (PROTOCOL_VERSION, "0000:03:00", "", "0000:03:00.1"),
+                    input: (
+                        PROTOCOL_VERSION,
+                        "0000:03:00",
+                        "",
+                        "0000:03:00.1",
+                        "instance",
+                    ),
                     expect: None,
                 },
                 Check {
                     scenario: "a slot-only supervisor cannot authorize execution",
-                    input: (PROTOCOL_VERSION, "0000:03:00", "boot", ""),
+                    input: (PROTOCOL_VERSION, "0000:03:00", "boot", "", "instance"),
+                    expect: None,
+                },
+                Check {
+                    scenario: "protocol 4 cannot omit its service instance",
+                    input: (PROTOCOL_VERSION, "0000:03:00", "boot", "0000:03:00.1", ""),
                     expect: None,
                 },
             ],
-            |(protocol_version, device_identity, boot_id, execution_device)| {
-                SupervisorStatus::try_from(GetSupervisorStatusResponse {
+            |(protocol_version, device_identity, boot_id, execution_device, instance)| {
+                let decoded = SupervisorStatus::try_from(GetSupervisorStatusResponse {
                     protocol_version,
                     device_identity: device_identity.to_string(),
                     boot_id: boot_id.to_string(),
                     execution_device: execution_device.to_string(),
-                })
-                .map(SupervisorIdentity::from)
-                .ok()
+                    supervisor_instance_id: instance.into(),
+                });
+                if let Ok(status) = &decoded {
+                    assert_eq!(
+                        status.supervisor_instance_id.as_deref(),
+                        (!instance.is_empty()).then_some(instance)
+                    );
+                }
+                decoded.map(SupervisorIdentity::from).ok()
             },
         );
+    }
+
+    /// The private handshake must enforce the same opaque-token format as Core,
+    /// so a response cannot establish admission with an unusable instance ID.
+    #[test]
+    fn handshake_rejects_malformed_instance_tokens() {
+        let maximum = "x".repeat(256);
+        let oversized = "x".repeat(257);
+        for (scenario, token, accepted) in [
+            ("one byte", "!", true),
+            ("maximum length", maximum.as_str(), true),
+            ("over maximum length", oversized.as_str(), false),
+            ("embedded whitespace", "instance token", false),
+            ("non-ASCII", "instancé", false),
+        ] {
+            let result = SupervisorStatus::try_from(GetSupervisorStatusResponse {
+                protocol_version: PROTOCOL_VERSION,
+                device_identity: "0000:03:00".into(),
+                boot_id: "boot".into(),
+                execution_device: "0000:03:00.1".into(),
+                supervisor_instance_id: token.into(),
+            });
+            if accepted {
+                assert_eq!(
+                    result.unwrap().supervisor_instance_id.as_deref(),
+                    Some(token),
+                    "{scenario}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(FirmwareSupervisorClientError::InvalidResponse(_))
+                    ),
+                    "{scenario}"
+                );
+            }
+        }
     }
 
     /// A missing or unrelated receipt must not turn transport success into
@@ -650,5 +955,22 @@ mod tests {
             ],
             |(receipt, expected_id)| decode_operation(receipt, expected_id).is_ok(),
         );
+    }
+
+    /// An absence response must carry its own usable token; a valid earlier
+    /// handshake cannot authorize admission on behalf of that response.
+    #[test]
+    fn observation_rejects_missing_instance_token() {
+        let response = ObserveFirmwareOperationResponse {
+            result: Some(observe_firmware_operation_response::Result::MissingReceipt(
+                FirmwareOperationMissingReceipt {
+                    supervisor_instance_id: String::new(),
+                },
+            )),
+        };
+        assert!(matches!(
+            decode_observation(response, "expected"),
+            Err(FirmwareSupervisorClientError::InvalidResponse(_))
+        ));
     }
 }

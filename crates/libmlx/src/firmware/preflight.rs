@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use carbide_libmlx_model::device::identity::MlxDeviceIdentity;
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
 use thiserror::Error;
 
@@ -89,7 +90,7 @@ pub enum FirmwarePreflightError {
     /// Returned device identity does not match the requested target.
     #[error("device {field} does not match: expected {expected:?}, observed {observed:?}")]
     IdentityMismatch {
-        /// Identity field that failed: PCI address, part number, or PSID.
+        /// Identity field that failed: PCI address, part number, PSID, base MAC, or GUID.
         field: &'static str,
         /// Requested identity value.
         expected: String,
@@ -209,6 +210,30 @@ pub(super) fn check_hardware_identity(
         }
     }
     Ok(())
+}
+
+/// Compare the frozen card selector with the existing pre-mutation query.
+/// A replacement with the same part number and PSID must not inherit this work.
+pub(super) fn check_expected_device(
+    device: &MlxDeviceInfo,
+    expected: &MlxDeviceIdentity,
+) -> Result<(), FirmwarePreflightError> {
+    if expected.matches(device) {
+        return Ok(());
+    }
+    let (field, expected, observed) = match expected {
+        MlxDeviceIdentity::Mac(mac) => (
+            "base MAC",
+            mac.to_string(),
+            device.base_mac.map(|mac| mac.to_string()),
+        ),
+        MlxDeviceIdentity::Guid(guid) => ("base GUID", guid.clone(), device.base_guid.clone()),
+    };
+    Err(FirmwarePreflightError::IdentityMismatch {
+        field,
+        expected,
+        observed,
+    })
 }
 
 async fn inspect_with_program(

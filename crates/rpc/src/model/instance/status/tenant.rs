@@ -17,6 +17,7 @@
 
 use model::instance::status::SyncState;
 use model::instance::status::tenant::{InstanceTenantStatus, TenantState};
+use model::machine::nic_firmware::{NicFirmwarePhase, NicFirmwarePurpose};
 use model::machine::{InstanceState, ManagedHostState};
 
 use crate as rpc;
@@ -128,6 +129,14 @@ pub fn instance_status_tenant_state(
             InstanceState::WaitingForDpaToBeReady => TenantState::Updating,
             InstanceState::Failed { .. } => TenantState::Failed,
         },
+        ManagedHostState::NicFirmwareUpdating { operation }
+            if matches!(operation.purpose, NicFirmwarePurpose::Allocation { .. }) =>
+        {
+            match operation.phase {
+                NicFirmwarePhase::Failed { .. } => TenantState::Failed,
+                _ => TenantState::Updating,
+            }
+        }
         ManagedHostState::ForceDeletion | ManagedHostState::Reset { .. } => {
             TenantState::Terminating
         }
@@ -189,6 +198,34 @@ mod tests {
     };
 
     use super::*;
+
+    /// Firmware work keeps an allocation unavailable even when networking and
+    /// repair flags would otherwise permit tenant readiness.
+    #[test]
+    fn nic_firmware_allocation_tenant_state() {
+        scenarios!(
+            run = |phase| {
+                let mut operation = model::test_support::nic_firmware::operation();
+                operation.purpose = NicFirmwarePurpose::Allocation {
+                    instance_id: uuid::Uuid::new_v4().into(),
+                    config_version: config_version::ConfigVersion::initial(),
+                };
+                operation.phase = phase;
+                instance_status_tenant_state(
+                    ManagedHostState::NicFirmwareUpdating { operation },
+                    SyncState::Synced, false, None, true, true, true,
+                ).map_err(drop)
+            };
+            "active work cannot become tenant ready" {
+                NicFirmwarePhase::ObservingSupervisor { target_index: 0 }
+                    => Yields(TenantState::Updating),
+            }
+            "terminal failure remains visible" {
+                NicFirmwarePhase::Failed { reason: "required verification failed".into() }
+                    => Yields(TenantState::Failed),
+            }
+        );
+    }
 
     #[test]
     fn repair_merge_active_detects_merge_sources() {

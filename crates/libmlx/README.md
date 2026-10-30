@@ -481,7 +481,17 @@ The daemon persists acceptance before starting work and records intent before ea
 
 An operation ID must contain 1–256 printable, non-space ASCII characters. IDs are scoped to a PCI slot's journal, not the host: another slot can contain independent work with the same ID. Reuse both the original target and ID to resolve a lost response. Retrieving a receipt never restarts work, and resubmitting the identical profile and observer-exit policy to that slot returns the existing receipt. Reusing its ID with different work is rejected. After an uncertain result, do not invent a replacement ID or select another target. Scout's DPA path reads first and submits only after `NotFound`, preserving the accepted request even when Core's live profile changes or disappears. A new legacy request with no profile records a no-work `Complete` receipt with `flashed=false`; it still passes predecessor and host-claim checks.
 
-The checked `submit_update` method requires a profile and `FirmwareUpdateContext`: a phase ID with the same character and length bounds as the operation ID, plus expected image and optional configuration SHA-256 digests. Checked operation IDs cannot start with `dpa-firmware:`, which is reserved for legacy DPA state entries. The configuration digest is required exactly when its source is present. Wire digests use 64 lowercase hexadecimal characters. Sources must use unauthenticated HTTP(S) without user information, queries, fragments, or redirects. The phase ID, digests, exact execution PCI address, profile, and observer policy participate in request identity. Every delivery submits that immutable request, including when observing completed work; it never downloads again merely to return a receipt. The daemon stages its own copies and saves their actual hashes before checking both expected digests and the existing read-only preflight. A mismatch stops before mutation and retains the staged bytes for diagnosis, as does failed checked preflight. Legacy submissions still record actual hashes but do not compare caller-supplied expected digests.
+For automatic retries, `observe_update` compares the supplied profile, context,
+and observer policy with the recorded request. It returns either the matching
+receipt or `MissingReceipt` with the serving process's instance token, without
+submitting work or querying hardware. Before the first submission, retain that
+token and pass it unchanged to `submit_update_on_instance`.
+A replacement daemon can return a matching retained receipt, but it cannot
+admit missing work under the previous token. A missing receipt after replacement
+requires reconciliation; it does not authorize obtaining a new token and burning
+again. A failed or unreadable journal returns an error, not `MissingReceipt`.
+
+The checked `observe_update`, `submit_update`, and `submit_update_on_instance` methods require a profile and `FirmwareUpdateContext`: a phase ID with the same character and length bounds as the operation ID, expected image and optional configuration SHA-256 digests, and an optional `expected_device` base-MAC or GUID selector. Checked operation IDs cannot start with `dpa-firmware:`, which is reserved for legacy DPA state entries. The configuration digest is required exactly when its source is present. Wire digests use 64 lowercase hexadecimal characters. Sources must use unauthenticated HTTP(S) without user information, queries, fragments, or redirects. The phase ID, digests, selector, exact execution PCI address, profile, and observer policy participate in request identity. Both checked observation and submission compare that identity before returning an existing receipt. Neither downloads again merely to return a receipt. The daemon stages its own copies and saves their actual hashes before checking both expected digests and the existing read-only preflight. When supplied, the selector must match the live card before mutation. A mismatch stops before mutation and retains the staged bytes for diagnosis, as does failed checked preflight. Legacy submissions still record actual hashes but do not compare caller-supplied expected digests.
 
 Scout's generic command and its production integration boundary are described in [supervised NIC firmware updates](../scout/README.md#supervised-nic-firmware-updates).
 
@@ -493,11 +503,24 @@ The typed client resolves local image, configuration, and SSH-key paths against 
 
 Connecting and each RPC have a five-second total deadline, including channel readiness. Launch/readiness has a separate ten-second bound. Requests and responses are limited to 128 KiB. These bounds do not limit the firmware operation's lifetime; a timeout, dropped client, or closed socket does not cancel accepted work. The client does not automatically retry RPCs.
 
-Private protocol 3 supports checked submission and post-reset verification retries. The client can read and cancel receipts from protocol-1 and protocol-2 daemons, but every submission requires protocol 3. Protocol 1 ignores retry policy; protocols 1 and 2 ignore checked update context. Refusal includes resubmission through `firmware flash`, `firmware flash-config`, or `submit_update`; use `firmware status` to read an existing receipt. Upgrading the client does not replace a running daemon or replay accepted work. Protocol-1 and protocol-2 clients reject protocol-3 daemons; use matching updated Scout or CLI binaries and helpers. Scouts predating retry support omit the timing fields, so upgrading Core alone does not enable the retry policy.
+Private protocol 4 adds receipt observation and submission guarded by a retained
+instance token. `observe_update` and `submit_update_on_instance` require protocol
+4, as does a supplied
+`expected_device`. The client can read and cancel receipts from protocols 1
+through 3. Unguarded `submit` and `submit_update`, including firmware CLI
+submissions, require protocol 3 or 4; they do not prevent replay after journal
+loss. Protocol 1 ignores retry policy, protocols 1 and 2 ignore checked update
+context, and protocol 3 ignores the instance guard.
 
-To replace a protocol-1 or protocol-2 daemon, pause its callers and inspect the existing receipt with the updated client. Let accepted work settle and reconcile any uncertain hardware effects. Identify the daemon serving the exact execution device and state root, send SIGTERM to that daemon only, and wait for it to exit. Preserve its journal, prepared inputs, and host claim; the next connection launches the installed matching helper against that state. Do not stop an active worker's scope or force termination to accelerate replacement. Replacing a daemon does not resolve an uncertain operation: its retained receipt and claim still block new work.
+Use `firmware status` to read an existing receipt without submitting work.
+Upgrading the client does not replace a running daemon or replay accepted work.
+Clients limited to protocols 1 through 3 reject protocol-4 daemons, so install
+matching updated Scout or CLI binaries and helpers. Scouts predating retry
+support omit the timing fields; upgrading Core alone does not enable that policy.
 
-Older helpers cannot reopen a journal containing checked update context: their strict decoder rejects the added request field. Keep the matching updated helper available to inspect and reconcile that journal. A fresh state root, journal deletion, or downgrade does not reconcile the recorded hardware work.
+To replace a daemon using a protocol before version 4, pause its callers and inspect the existing receipt with the updated client. Let accepted work settle and reconcile any uncertain hardware effects. Identify the daemon serving the exact execution device and state root, send SIGTERM to that daemon only, and wait for it to exit. Preserve its journal, prepared inputs, and host claim; the next connection launches the installed matching helper against that state. Do not stop an active worker's scope or force termination to accelerate replacement. Replacing a daemon does not resolve an uncertain operation: its retained receipt and claim still block new work.
+
+Protocol-1 and protocol-2 helpers cannot reopen a journal containing checked update context: their strict decoder rejects the added request field. Protocol-3 helpers also reject context containing `expected_device`; omitting it preserves the protocol-3 request fingerprint. Keep the matching updated helper available to inspect and reconcile that journal. A fresh state root, journal deletion, or downgrade does not reconcile the recorded hardware work.
 
 Each daemon permits eight journal RPC tasks across all connections, including tasks whose callers have disconnected. Excess requests return `RESOURCE_EXHAUSTED` without waiting for capacity. Execution progress and observer cancellation do not consume this quota. Transport limits separately allow 32 connected sockets and eight active HTTP/2 streams per connection; excess sockets are closed.
 
@@ -547,7 +570,7 @@ After daemon loss, reopening same-boot unfinished work records `Interrupted` or,
 
 This state supports process recovery, not reboot or reinstall recovery. The default `/run` location and a PXE/tmpfs root can disappear on reboot. A surviving journal from another boot remains readable but rejects further mutation. Loss of the journal is not evidence that earlier device work completed safely.
 
-For failed or uncertain work, inspect the receipt with [`firmware status`](#firmware-cli) and retain the journal, prepared inputs, and supervisor log. There is no supported repair or retry command for an uncertain operation. Deleting state or rebooting does not reconcile its hardware effects. Recovery across reboot is tracked in [the firmware recovery follow-up](https://github.com/dsx-ai-factory/infra-controller/issues/6677).
+For failed or uncertain work, inspect the receipt with [`firmware status`](#firmware-cli) and retain the journal, prepared inputs, and supervisor log. There is no supported repair or retry command for an uncertain operation. Deleting state or rebooting does not reconcile its hardware effects. Core can retain completed receipts across a planned activation reboot and then request fresh inventory, as described in [Core Reconciliation](../scout/README.md#core-reconciliation). That controller recovery does not make a missing or interrupted local operation safe to replay.
 
 ### FirmwareFlasher
 

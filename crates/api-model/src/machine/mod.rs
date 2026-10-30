@@ -73,6 +73,7 @@ pub mod json;
 pub mod machine_id;
 pub mod machine_search_config;
 pub mod network;
+pub mod nic_firmware;
 pub mod nvlink;
 pub mod spx;
 pub mod spx_multiplane;
@@ -1474,6 +1475,12 @@ pub enum ManagedHostState {
         /// omit this, so their completion must leave pending requests alone.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request: Option<MachineMaintenanceRequest>,
+    },
+
+    /// Host-owned generic NIC firmware work, separate from legacy DPA commands.
+    NicFirmwareUpdating {
+        /// Frozen requests and durable progress for the admitted cards.
+        operation: nic_firmware::NicFirmwareOperation,
     },
 
     /// Host is assigned to an Instance.
@@ -3140,6 +3147,9 @@ impl Display for ManagedHostState {
             ManagedHostState::Maintenance { operation, .. } => {
                 write!(f, "Maintenance({operation:?})")
             }
+            ManagedHostState::NicFirmwareUpdating { operation } => {
+                write!(f, "NicFirmwareUpdating/{}", operation.phase)
+            }
             ManagedHostState::Assigned { instance_state, .. } => match instance_state {
                 InstanceState::DPUReprovision { dpu_states } => {
                     let dpu_lowest_state = dpu_states
@@ -3255,6 +3265,7 @@ impl ManagedHostState {
             ManagedHostState::Maintenance { operation, .. } => {
                 format!("Maintenance({operation:?})")
             }
+            ManagedHostState::NicFirmwareUpdating { .. } => "NicFirmwareUpdating".to_string(),
             ManagedHostState::Assigned { instance_state } => match instance_state {
                 InstanceState::DPUReprovision { dpu_states } => {
                     format!(
@@ -3514,6 +3525,7 @@ pub fn state_sla(
         ManagedHostState::Maintenance { .. } => {
             StateSla::with_sla(slas::MAINTENANCE, time_in_state)
         }
+        ManagedHostState::NicFirmwareUpdating { .. } => StateSla::no_sla(),
         ManagedHostState::Assigned { instance_state } => match instance_state {
             InstanceState::Ready => StateSla::no_sla(),
             InstanceState::BootingWithDiscoveryImage { retry } => {

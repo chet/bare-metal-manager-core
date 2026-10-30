@@ -428,6 +428,7 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
         spx_status_observation: None,
         spx_multiplane_status: None,
         mlx_device_observation: None,
+        nic_firmware_baseline: None,
         extension_service_status_observations: Default::default(),
         controller_state_version: config_version(5).version_string(),
         controller_state: ManagedHostState::Ready,

@@ -139,6 +139,7 @@ var computePhaseByState = map[string]types.Phase{
 	"RotatingHostUefi":      types.PhaseInUse,
 	"RotatingDpuUefi":       types.PhaseInUse,
 	"RotatingNicLockdown":   types.PhaseInUse,
+	"NicFirmwareUpdating":   types.PhaseInUse,
 	"Failed":                types.PhaseError,
 	"Decommissioning":       types.PhaseDeleting,
 	"ForceDeletion":         types.PhaseDeleting,

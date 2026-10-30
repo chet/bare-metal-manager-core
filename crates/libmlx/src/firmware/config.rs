@@ -91,8 +91,8 @@ impl From<FirmwareArtifactDigests> for FirmwareArtifactDigestsPb {
     }
 }
 
-/// `FirmwareUpdateContext` pins a checked workflow to its whole-workflow phase ID
-/// and approved artifact bytes. It is immutable once the operation is admitted.
+/// `FirmwareUpdateContext` pins a checked workflow to its whole-workflow phase ID,
+/// approved artifact bytes, and optional card identity. It is immutable after admission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FirmwareUpdateContext {
@@ -100,6 +100,10 @@ pub struct FirmwareUpdateContext {
     pub phase_id: String,
     /// Expected image and optional configuration bytes, checked before mutation.
     pub expected_digests: FirmwareArtifactDigests,
+    /// Optional reported base MAC or GUID checked against the live device before
+    /// mutation. Omission preserves the protocol-3 request identity and checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_device: Option<carbide_libmlx_model::device::identity::MlxDeviceIdentity>,
 }
 
 impl FirmwareUpdateContext {
@@ -108,6 +112,12 @@ impl FirmwareUpdateContext {
     /// user information, query strings, or fragments. Downloads reject redirects.
     /// Legacy submissions retain their separate, broader source contract.
     pub fn validate(&self, profile: &FirmwareFlasherProfile) -> FirmwareResult<()> {
+        if let Some(expected_device) = &self.expected_device {
+            expected_device
+                .clone()
+                .validate()
+                .map_err(|error| FirmwareError::ConfigError(error.to_string()))?;
+        }
         if self.phase_id.is_empty()
             || self.phase_id.len() > 256
             || !self.phase_id.bytes().all(|byte| byte.is_ascii_graphic())
@@ -795,6 +805,7 @@ mod tests {
                     image_sha256: [0; 32],
                     configuration_sha256: digest,
                 },
+                expected_device: None,
             };
             assert_eq!(context.validate(&profile).is_ok(), valid, "{scenario}");
         }
@@ -823,6 +834,7 @@ mod tests {
                 image_sha256: [0; 32],
                 configuration_sha256: Some([1; 32]),
             },
+            expected_device: None,
         };
         scenarios!(run = |(image, configuration): (Option<Credentials>, Option<Credentials>)| {
             let mut profile = profile.clone();

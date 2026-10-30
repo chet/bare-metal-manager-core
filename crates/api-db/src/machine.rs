@@ -24,6 +24,7 @@ use std::ops::Deref;
 use std::str::FromStr;
 
 use carbide_uuid::dpa_interface::DpaInterfaceId;
+use carbide_uuid::instance::InstanceId;
 use carbide_uuid::instance_type::InstanceTypeId;
 use carbide_uuid::machine::{
     DpuMachineId, HostMachineId, MachineId, MachineIdSubtypeTrait, MachineType,
@@ -50,6 +51,7 @@ use model::machine::network::{
     DpuFabricInterfaceStatusObservation, MachineNetworkStatusObservation, ManagedHostNetworkConfig,
     ManagedHostQuarantineState,
 };
+use model::machine::nic_firmware::{NicFirmwareBaseline, NicFirmwarePurpose};
 use model::machine::nvlink::MachineNvLinkStatusObservation;
 use model::machine::spx::MachineSpxStatusObservation;
 use model::machine::spx_multiplane::{MachineSpxMultiplane, MachineSpxMultiplaneStatus};
@@ -1521,13 +1523,16 @@ pub async fn update_spx_multiplane_status(
 /// exists or the new timestamp is at least as recent. Comparisons use the
 /// database's timestamp precision. Returns `NotApplied` if the machine is
 /// missing or a newer observation is stored. Callers must validate report
-/// ownership and completeness.
+/// ownership and completeness. Accepted reports receive a database-clock
+/// `received_at`; any value supplied by the caller is replaced.
 pub async fn update_mlx_device_observation(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
     observation: &MlxDeviceObservation,
 ) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
-    let query = "UPDATE machines SET mlx_device_observation = $1::json WHERE id = $2 AND
+    let query = "UPDATE machines SET mlx_device_observation =
+                    jsonb_set($1::jsonb, '{received_at}', to_jsonb(clock_timestamp()))
+                WHERE id = $2 AND
                 (mlx_device_observation IS NULL
                     OR (mlx_device_observation->>'observed_at')::timestamptz
                         <= ($1::json->>'observed_at')::timestamptz) RETURNING id";
@@ -2911,6 +2916,161 @@ pub async fn try_update_controller_state(
     Ok(ConditionalWrite::Applied(()))
 }
 
+/// `lock_nic_firmware_state` locks history retention before the host row and
+/// checks the snapshot used by firmware reconciliation. A missing host or stale
+/// version returns `NotApplied(ControllerStateNotCurrent)` without any writes.
+/// Locks remain in the caller's transaction, which must perform its state CAS
+/// before committing related writes. Any instance lock must be acquired first.
+pub async fn lock_nic_firmware_state(
+    txn: &mut PgConnection,
+    host_id: &HostMachineId,
+    expected_version: ConfigVersion,
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
+    // `advance` acquires this advisory lock through the history trigger before
+    // locking machines. Side writes in the same transaction must keep that order.
+    let query = "SELECT pg_advisory_xact_lock(\
+                    hashtextextended($1, 'machine_state_history'::regclass::bigint)\
+                )";
+    sqlx::query(query)
+        .bind(host_id.to_string())
+        .execute(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    let query = "SELECT id FROM machines
+                 WHERE id = $1 AND controller_state_version = $2 FOR UPDATE";
+    let locked: Option<HostMachineId> = sqlx::query_scalar(query)
+        .bind(host_id)
+        .bind(expected_version)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(match locked {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
+}
+
+/// `prepare_nic_firmware_completion` rechecks ownership and optionally writes
+/// the accepted baseline before the controller's standard state transition.
+/// An absent baseline preserves the previous one. A missing host, stale
+/// controller version or changed allocation ownership/generation returns
+/// `NotApplied(ControllerStateNotCurrent)` without retaining baseline writes.
+///
+/// Locks are acquired in Instance → History → Machine order and remain in the
+/// caller's transaction. This helper does not change state, version or history;
+/// the caller must perform its state CAS in that transaction before committing.
+pub async fn prepare_nic_firmware_completion(
+    txn: &mut PgConnection,
+    host_id: &HostMachineId,
+    expected_version: ConfigVersion,
+    purpose: &NicFirmwarePurpose,
+    baseline: Option<&NicFirmwareBaseline>,
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
+    let mut inner_txn = Transaction::begin_inner(txn).await?;
+    let expected_instance = match purpose {
+        NicFirmwarePurpose::Baseline { .. } => None,
+        NicFirmwarePurpose::Allocation { instance_id, .. }
+        | NicFirmwarePurpose::RestoreBaseline { instance_id, .. } => Some(*instance_id),
+    };
+    if let Some(instance_id) = expected_instance {
+        // Instance configuration and release take Instance before Machine.
+        // Keep that order, followed by the state helper's History before Machine.
+        let query =
+            "SELECT machine_id, config_version, deleted FROM instances WHERE id = $1 FOR UPDATE";
+        let owner: Option<(HostMachineId, ConfigVersion, Option<DateTime<Utc>>)> =
+            sqlx::query_as(query)
+                .bind(instance_id)
+                .fetch_optional(inner_txn.as_pgconn())
+                .await
+                .map_err(|error| DatabaseError::query(query, error))?;
+        let owner_matches = match owner {
+            Some((machine_id, current_version, deleted)) => {
+                machine_id == *host_id
+                    && purpose.matches_owner(Some((
+                        instance_id,
+                        current_version,
+                        deleted.is_some(),
+                    )))
+            }
+            None => purpose.matches_owner(None),
+        };
+        if !owner_matches {
+            inner_txn.rollback().await?;
+            return Ok(ConditionalWrite::NotApplied(ControllerStateNotCurrent));
+        }
+    }
+    let applied = lock_nic_firmware_state(inner_txn.as_pgconn(), host_id, expected_version).await?;
+    if let ConditionalWrite::NotApplied(reason) = applied {
+        inner_txn.rollback().await?;
+        return Ok(ConditionalWrite::NotApplied(reason));
+    }
+    // Allocation locks the host before inserting its Instance. Holding that row
+    // now also protects an absent owner from a new assignment until commit.
+    let query = "SELECT id FROM instances WHERE machine_id = $1";
+    let attached_instance: Option<InstanceId> = sqlx::query_scalar(query)
+        .bind(host_id)
+        .fetch_optional(inner_txn.as_pgconn())
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    let attachment_matches = match purpose {
+        NicFirmwarePurpose::Baseline { .. } => attached_instance.is_none(),
+        NicFirmwarePurpose::Allocation { .. } => attached_instance == expected_instance,
+        NicFirmwarePurpose::RestoreBaseline { .. } => {
+            attached_instance.is_none() || attached_instance == expected_instance
+        }
+    };
+    if !attachment_matches {
+        inner_txn.rollback().await?;
+        return Ok(ConditionalWrite::NotApplied(ControllerStateNotCurrent));
+    }
+    if let Some(baseline) = baseline {
+        // The row lock keeps this baseline and the caller's state transition
+        // together; the controller processor commits or rolls back both.
+        let query = "UPDATE machines SET nic_firmware_baseline = $1 WHERE id = $2 RETURNING id";
+        sqlx::query_scalar::<_, HostMachineId>(query)
+            .bind(sqlx::types::Json(baseline))
+            .bind(host_id)
+            .fetch_one(inner_txn.as_pgconn())
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+    }
+    inner_txn.commit().await?;
+    Ok(ConditionalWrite::Applied(()))
+}
+
+/// `prepare_nic_firmware_owner_release` checks that the original allocation is
+/// still attached and deleted before returning safely restored firmware work to
+/// normal instance release. Configuration changes do not matter for that deleted
+/// owner. Missing, live or replaced owners and stale host versions return
+/// `NotApplied(ControllerStateNotCurrent)`.
+///
+/// The caller must have completed access restoration; this checks ownership,
+/// not firmware evidence.
+/// This helper writes no state or history. Its Instance → History → Machine
+/// locks remain in the caller's transaction, including on `NotApplied`; a caller
+/// that proceeds must perform its state CAS before committing that transaction.
+pub async fn prepare_nic_firmware_owner_release(
+    txn: &mut PgConnection,
+    host_id: &HostMachineId,
+    expected_version: ConfigVersion,
+    instance_id: &InstanceId,
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
+    let query = "SELECT id FROM instances
+                 WHERE id = $1 AND machine_id = $2 AND deleted IS NOT NULL FOR UPDATE";
+    let owner: Option<InstanceId> = sqlx::query_scalar(query)
+        .bind(instance_id)
+        .bind(host_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if owner.is_none() {
+        return Ok(ConditionalWrite::NotApplied(ControllerStateNotCurrent));
+    }
+    // `instances_unique_machine_id` permits only this attached owner. Holding
+    // its row prevents removal or reassignment before the caller's transition.
+    lock_nic_firmware_state(txn, host_id, expected_version).await
+}
+
 pub async fn update_state(
     txn: &mut PgConnection,
     host_id: &HostMachineId,
@@ -4173,6 +4333,557 @@ mod test {
         MachineId::new(MachineIdSource::ProductBoardChassisSerial, [seed; 32], ty)
     }
 
+    /// Completion, retained evidence and history must choose the same winner;
+    /// the losing snapshot cannot replace the baseline after waiting for a lock.
+    #[crate::sqlx_test]
+    async fn nic_firmware_completion_keeps_baseline_with_the_winning_state(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::test_support::nic_firmware::{baseline, operation};
+
+        let host_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let operation = operation();
+        let initial_state = ManagedHostState::NicFirmwareUpdating {
+            operation: operation.clone(),
+        };
+        let mut setup_txn = pool.begin().await?;
+        super::create(
+            setup_txn.as_mut(),
+            None,
+            &host_id.into(),
+            initial_state.clone(),
+            None,
+            2,
+        )
+        .await?;
+        setup_txn.commit().await?;
+        let machine = super::find_one(
+            &pool,
+            &host_id,
+            MachineSearchConfig {
+                include_history: true,
+                ..Default::default()
+            },
+        )
+        .await?
+        .expect("fixture host");
+        assert_eq!(machine.status.nic_firmware_baseline, None);
+        let expected_version = machine.state.version;
+        let winner_version = expected_version.increment();
+        let accepted = baseline();
+        let mut winner = pool.begin().await?;
+        let winner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(winner.as_mut())
+            .await?;
+        assert_eq!(
+            super::prepare_nic_firmware_completion(
+                winner.as_mut(),
+                &host_id,
+                expected_version,
+                &operation.purpose,
+                Some(&accepted),
+            )
+            .await?,
+            crate::ConditionalWrite::Applied(())
+        );
+
+        // Preparation owns the row but must leave the processor's sole state
+        // CAS, history write and eventual transition event untouched.
+        let prepared = super::find_one(
+            winner.as_mut(),
+            &host_id,
+            MachineSearchConfig {
+                include_history: true,
+                ..Default::default()
+            },
+        )
+        .await?
+        .expect("prepared host");
+        assert_eq!(prepared.state.value, machine.state.value);
+        assert_eq!(prepared.state.version, machine.state.version);
+        assert_eq!(
+            serde_json::to_value(&prepared.history)?,
+            serde_json::to_value(&machine.history)?,
+        );
+        assert_eq!(
+            prepared.status.nic_firmware_baseline,
+            Some(accepted.clone())
+        );
+        assert_eq!(
+            super::try_update_controller_state(
+                winner.as_mut(),
+                &host_id,
+                expected_version,
+                winner_version,
+                &ManagedHostState::Ready,
+            )
+            .await?,
+            crate::ConditionalWrite::Applied(())
+        );
+
+        // Other readers must see neither half of the uncommitted completion.
+        let before_commit = super::find_one(&pool, &host_id, MachineSearchConfig::default())
+            .await?
+            .expect("uncommitted host");
+        assert_eq!(before_commit.state.value, initial_state);
+        assert_eq!(before_commit.status.nic_firmware_baseline, None);
+        let mut rejected = accepted.clone();
+        rejected.operation_id = "stale-workflow".into();
+        let losing_write = async {
+            let mut loser = pool.begin().await?;
+            let result = super::prepare_nic_firmware_completion(
+                loser.as_mut(),
+                &host_id,
+                expected_version,
+                &operation.purpose,
+                Some(&rejected),
+            )
+            .await?;
+            if result == crate::ConditionalWrite::Applied(()) {
+                super::try_update_controller_state(
+                    loser.as_mut(),
+                    &host_id,
+                    expected_version,
+                    expected_version.increment(),
+                    &ManagedHostState::ForceDeletion,
+                )
+                .await?;
+            }
+            loser.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(result)
+        };
+        let commit_winner = async {
+            crate::test_support::postgres::wait_for_blocked_query(
+                &pool,
+                winner_pid,
+                "SELECT pg_advisory_xact_lock",
+            )
+            .await;
+            winner.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::try_join!(losing_write, commit_winner)
+        })
+        .await??;
+        assert_eq!(
+            result,
+            crate::ConditionalWrite::NotApplied(crate::ControllerStateNotCurrent)
+        );
+        let saved = super::find_one(
+            &pool,
+            &host_id,
+            MachineSearchConfig {
+                include_history: true,
+                ..Default::default()
+            },
+        )
+        .await?
+        .expect("completed host");
+        assert_eq!(saved.state.value, ManagedHostState::Ready);
+        assert_eq!(saved.state.version, winner_version);
+        assert_eq!(saved.status.nic_firmware_baseline, Some(accepted.clone()));
+        assert_eq!(saved.history.len(), machine.history.len() + 1);
+
+        // Passing no replacement baseline must preserve the accepted recipe,
+        // not interpret absence as permission to clear it.
+        let mut preserve = pool.begin().await?;
+        assert_eq!(
+            super::prepare_nic_firmware_completion(
+                preserve.as_mut(),
+                &host_id,
+                saved.state.version,
+                &operation.purpose,
+                None,
+            )
+            .await?,
+            crate::ConditionalWrite::Applied(())
+        );
+        assert_eq!(
+            super::try_update_controller_state(
+                preserve.as_mut(),
+                &host_id,
+                saved.state.version,
+                saved.state.version.increment(),
+                &ManagedHostState::Ready,
+            )
+            .await?,
+            crate::ConditionalWrite::Applied(())
+        );
+        preserve.commit().await?;
+        let saved = super::find_one(&pool, &host_id, MachineSearchConfig::default())
+            .await?
+            .expect("preserved baseline");
+        assert_eq!(saved.status.nic_firmware_baseline, Some(accepted));
+        Ok(())
+    }
+
+    /// A tenant edit changes allocation generation without changing host state;
+    /// completion must wait for that writer and reject its now-stale ownership.
+    #[crate::sqlx_test]
+    async fn nic_firmware_completion_rechecks_allocation_after_concurrent_edit(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::instance::InstanceId;
+        use config_version::ConfigVersion;
+        use model::machine::nic_firmware::NicFirmwarePurpose;
+        use model::test_support::nic_firmware::operation;
+
+        let host_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let instance_id = InstanceId::new();
+        let config_version = ConfigVersion::initial();
+        let mut operation = operation();
+        operation.purpose = NicFirmwarePurpose::Allocation {
+            instance_id,
+            config_version,
+        };
+        let initial_state = ManagedHostState::NicFirmwareUpdating {
+            operation: operation.clone(),
+        };
+        let mut setup = pool.begin().await?;
+        super::create(
+            setup.as_mut(),
+            None,
+            &host_id.into(),
+            initial_state.clone(),
+            None,
+            2,
+        )
+        .await?;
+        sqlx::query("INSERT INTO instances (id, machine_id, config_version, network_config) VALUES ($1, $2, $3, '{\"interfaces\": []}')")
+            .bind(instance_id).bind(host_id).bind(config_version).execute(setup.as_mut()).await?;
+        setup.commit().await?;
+        let machine = super::find_one(&pool, &host_id, MachineSearchConfig::default())
+            .await?
+            .expect("allocated host");
+        let mut writer = pool.begin().await?;
+        let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(writer.as_mut())
+            .await?;
+        sqlx::query("UPDATE instances SET config_version = $1 WHERE id = $2")
+            .bind(config_version.increment())
+            .bind(instance_id)
+            .execute(writer.as_mut())
+            .await?;
+        let complete = async {
+            let mut txn = pool.begin().await?;
+            let result = super::prepare_nic_firmware_completion(
+                txn.as_mut(),
+                &host_id,
+                machine.state.version,
+                &operation.purpose,
+                None,
+            )
+            .await?;
+            txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(result)
+        };
+        let commit_edit = async {
+            crate::test_support::postgres::wait_for_blocked_query(
+                &pool,
+                writer_pid,
+                "SELECT machine_id, config_version, deleted",
+            )
+            .await;
+            writer.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::try_join!(complete, commit_edit)
+        })
+        .await??;
+        assert_eq!(
+            result,
+            crate::ConditionalWrite::NotApplied(crate::ControllerStateNotCurrent)
+        );
+        let saved = super::find_one(&pool, &host_id, MachineSearchConfig::default())
+            .await?
+            .expect("unchanged host");
+        assert_eq!(saved.state.value, initial_state);
+        assert_eq!(saved.state.version, machine.state.version);
+        assert_eq!(saved.status.nic_firmware_baseline, None);
+        Ok(())
+    }
+
+    /// A deleted instance can be removed while recovery still holds its ID.
+    /// Waiting on that row must not authorize release of its replacement.
+    #[crate::sqlx_test]
+    async fn nic_firmware_owner_release_rejects_replacement_after_waiting(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::instance::InstanceId;
+
+        let host_id = HostMachineId::try_from(machine_id(29, MachineType::Host))?;
+        let instance_id = InstanceId::new();
+        let replacement_id = InstanceId::new();
+        let mut setup = pool.begin().await?;
+        super::create(
+            setup.as_mut(),
+            None,
+            &host_id.into(),
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        sqlx::query("INSERT INTO instances (id, machine_id, deleted, network_config) VALUES ($1, $2, clock_timestamp(), '{\"interfaces\": []}')")
+            .bind(instance_id).bind(host_id).execute(setup.as_mut()).await?;
+        setup.commit().await?;
+        let original = super::find_one(
+            &pool,
+            &host_id,
+            MachineSearchConfig {
+                include_history: true,
+                ..Default::default()
+            },
+        )
+        .await?
+        .expect("host with deleted allocation");
+
+        // Pause removal before commit. The prerequisite must wait for the
+        // original instance and then see that it no longer owns this host.
+        let mut replacement = pool.begin().await?;
+        let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(replacement.as_mut())
+            .await?;
+        sqlx::query("DELETE FROM instances WHERE id = $1")
+            .bind(instance_id)
+            .execute(replacement.as_mut())
+            .await?;
+        sqlx::query("INSERT INTO instances (id, machine_id, network_config) VALUES ($1, $2, '{\"interfaces\": []}')")
+            .bind(replacement_id).bind(host_id).execute(replacement.as_mut()).await?;
+        let prepare_release = async {
+            let mut txn = pool.begin().await?;
+            let prepared = super::prepare_nic_firmware_owner_release(
+                txn.as_mut(),
+                &host_id,
+                original.state.version,
+                &instance_id,
+            )
+            .await?;
+            txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(prepared)
+        };
+        let commit_replacement = async {
+            crate::test_support::postgres::wait_for_blocked_query(
+                &pool,
+                writer_pid,
+                "SELECT id FROM instances",
+            )
+            .await;
+            replacement.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (prepared, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::try_join!(prepare_release, commit_replacement)
+        })
+        .await??;
+        assert_eq!(
+            prepared,
+            crate::ConditionalWrite::NotApplied(crate::ControllerStateNotCurrent)
+        );
+        let attached: InstanceId =
+            sqlx::query_scalar("SELECT id FROM instances WHERE machine_id = $1")
+                .bind(host_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(attached, replacement_id);
+        let saved = super::find_one(
+            &pool,
+            &host_id,
+            MachineSearchConfig {
+                include_history: true,
+                ..Default::default()
+            },
+        )
+        .await?
+        .expect("host with replacement allocation");
+        assert_eq!(saved.state.value, original.state.value);
+        assert_eq!(saved.state.version, original.state.version);
+        assert_eq!(
+            serde_json::to_value(saved.history)?,
+            serde_json::to_value(original.history)?
+        );
+        assert_eq!(saved.status.nic_firmware_baseline, None);
+        Ok(())
+    }
+
+    /// The host lock protects attachment as well as the named owner. Removed
+    /// cleanup owners are allowed only while no replacement allocation exists.
+    #[crate::sqlx_test]
+    async fn nic_firmware_completion_checks_attached_instance(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::instance::InstanceId;
+        use config_version::ConfigVersion;
+        use model::machine::nic_firmware::{NicFirmwareBaselineContinuation, NicFirmwarePurpose};
+        use model::machine::{CleanupContext, CleanupState, InstanceState};
+        use model::test_support::nic_firmware::operation;
+
+        struct Case {
+            scenario: &'static str,
+            purpose: NicFirmwarePurpose,
+            attached_instance: Option<InstanceId>,
+            applies: bool,
+        }
+
+        let owner_id = InstanceId::new();
+        let replacement_id = InstanceId::new();
+        let config_version = ConfigVersion::initial();
+        let restore = NicFirmwarePurpose::RestoreBaseline {
+            instance_id: InstanceId::new(),
+            cleanup_context: CleanupContext::Deprovision,
+        };
+        let cases = [
+            Case {
+                scenario: "the exact live allocation may continue",
+                purpose: NicFirmwarePurpose::Allocation {
+                    instance_id: owner_id,
+                    config_version,
+                },
+                attached_instance: Some(owner_id),
+                applies: true,
+            },
+            Case {
+                scenario: "baseline completion cannot accept an attached tenant",
+                purpose: NicFirmwarePurpose::Baseline {
+                    continuation: NicFirmwareBaselineContinuation::Ready,
+                },
+                attached_instance: Some(InstanceId::new()),
+                applies: false,
+            },
+            Case {
+                scenario: "restoration may finish after its owner was removed",
+                purpose: restore.clone(),
+                attached_instance: None,
+                applies: true,
+            },
+            Case {
+                scenario: "removed cleanup owner cannot replace a new allocation",
+                purpose: restore,
+                attached_instance: Some(replacement_id),
+                applies: false,
+            },
+        ];
+        for (seed, case) in (30..).zip(cases) {
+            let host_id = HostMachineId::try_from(machine_id(seed, MachineType::Host))?;
+            let mut operation = operation();
+            operation.purpose = case.purpose;
+            let initial_state = ManagedHostState::NicFirmwareUpdating {
+                operation: operation.clone(),
+            };
+            let continuation = match &operation.purpose {
+                NicFirmwarePurpose::Baseline { .. } => ManagedHostState::Ready,
+                NicFirmwarePurpose::Allocation { .. } => ManagedHostState::Assigned {
+                    instance_state: InstanceState::DpaProvisioning,
+                },
+                NicFirmwarePurpose::RestoreBaseline {
+                    cleanup_context, ..
+                } => ManagedHostState::WaitingForCleanup {
+                    cleanup_state: CleanupState::Init,
+                    cleanup_context: *cleanup_context,
+                },
+            };
+            let mut txn = pool.begin().await?;
+            super::create(
+                txn.as_mut(),
+                None,
+                &host_id.into(),
+                initial_state.clone(),
+                None,
+                2,
+            )
+            .await?;
+            if let Some(instance_id) = case.attached_instance {
+                sqlx::query("INSERT INTO instances (id, machine_id, config_version, network_config) VALUES ($1, $2, $3, '{\"interfaces\": []}')")
+                    .bind(instance_id).bind(host_id).bind(config_version).execute(txn.as_mut()).await?;
+            }
+            let original = super::find_one(
+                txn.as_mut(),
+                &host_id,
+                MachineSearchConfig {
+                    include_history: true,
+                    ..Default::default()
+                },
+            )
+            .await?
+            .expect("host before completion");
+            let new_version = original.state.version.increment();
+            let prepared = super::prepare_nic_firmware_completion(
+                txn.as_mut(),
+                &host_id,
+                original.state.version,
+                &operation.purpose,
+                None,
+            )
+            .await?;
+            assert_eq!(
+                prepared,
+                if case.applies {
+                    crate::ConditionalWrite::Applied(())
+                } else {
+                    crate::ConditionalWrite::NotApplied(crate::ControllerStateNotCurrent)
+                },
+                "{}",
+                case.scenario,
+            );
+            if case.applies {
+                assert_eq!(
+                    super::try_update_controller_state(
+                        txn.as_mut(),
+                        &host_id,
+                        original.state.version,
+                        new_version,
+                        &continuation,
+                    )
+                    .await?,
+                    crate::ConditionalWrite::Applied(()),
+                    "{}",
+                    case.scenario,
+                );
+            }
+            txn.commit().await?;
+            let saved = super::find_one(
+                &pool,
+                &host_id,
+                MachineSearchConfig {
+                    include_history: true,
+                    ..Default::default()
+                },
+            )
+            .await?
+            .expect("host after completion");
+            assert_eq!(
+                saved.state.value,
+                if case.applies {
+                    continuation
+                } else {
+                    initial_state
+                },
+                "{}",
+                case.scenario,
+            );
+            assert_eq!(
+                saved.state.version,
+                if case.applies {
+                    new_version
+                } else {
+                    original.state.version
+                },
+                "{}",
+                case.scenario,
+            );
+            assert_eq!(
+                saved.history.len(),
+                original.history.len() + usize::from(case.applies)
+            );
+            assert_eq!(saved.status.nic_firmware_baseline, None);
+        }
+        Ok(())
+    }
+
     #[crate::sqlx_test]
     async fn host_state_lookup_preserves_association_and_decode_checks(
         pool: sqlx::PgPool,
@@ -4798,7 +5509,7 @@ mod test {
                 .execute(txn.as_mut())
                 .await?;
                 let observed_at = observed_at.parse()?;
-                let (result, incoming) = match column {
+                let (result, mut incoming) = match column {
                     "infiniband_status_observation" => {
                         let observation = MachineInfinibandStatusObservation {
                             observed_at,
@@ -4843,6 +5554,7 @@ mod test {
                     "mlx_device_observation" => {
                         let observation = MlxDeviceObservation {
                             observed_at,
+                            received_at: None,
                             devices: Vec::new(),
                         };
                         (
@@ -4868,6 +5580,11 @@ mod test {
                 .bind(machine_id)
                 .fetch_one(txn.as_mut())
                 .await?;
+                if column == "mlx_device_observation" && applies {
+                    let _: chrono::DateTime<chrono::Utc> =
+                        serde_json::from_value(persisted["received_at"].clone())?;
+                    incoming["received_at"] = persisted["received_at"].clone();
+                }
                 assert_eq!(
                     persisted,
                     if applies { incoming } else { stored.unwrap() },
@@ -4963,7 +5680,7 @@ mod test {
 
         let machine_id: HostMachineId =
             "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
-        let observation: MlxDeviceObservation = serde_json::from_value(serde_json::json!({
+        let legacy_json = serde_json::json!({
             "observed_at": "2026-09-16T16:00:00.123456789Z",
             "devices": [
                 {
@@ -4979,7 +5696,9 @@ mod test {
                     "status": "Failed to open device"
                 }
             ]
-        }))?;
+        });
+        let mut observation: MlxDeviceObservation = serde_json::from_value(legacy_json.clone())?;
+        assert_eq!(observation.received_at, None);
         let mut txn = pool.begin().await?;
         assert_eq!(
             update_mlx_device_observation(txn.as_mut(), &machine_id, &observation).await?,
@@ -4996,16 +5715,48 @@ mod test {
         )
         .await?;
         assert_eq!(machine.status.mlx_device_observation, None);
+
+        // Historical JSON has no receipt time. Loading it must not invent one
+        // that could satisfy a later controller activation boundary.
+        sqlx::query("UPDATE machines SET mlx_device_observation = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(legacy_json))
+            .bind(machine_id)
+            .execute(txn.as_mut())
+            .await?;
+        let legacy = super::find_one(txn.as_mut(), &machine_id, MachineSearchConfig::default())
+            .await?
+            .expect("legacy observation host");
+        assert_eq!(
+            legacy.status.mlx_device_observation,
+            Some(observation.clone())
+        );
+
+        // Only the persistence boundary assigns receipt time, independently of
+        // both the Scout timestamp and any value supplied by an internal caller.
+        observation.received_at = Some("2099-01-01T00:00:00Z".parse()?);
+        let before: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(txn.as_mut())
+            .await?;
         assert_eq!(
             update_mlx_device_observation(txn.as_mut(), &machine_id, &observation).await?,
             Applied(())
         );
+        let after: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(txn.as_mut())
+            .await?;
         txn.commit().await?;
 
         let machine = super::find_one(&pool, &machine_id, MachineSearchConfig::default())
             .await?
             .expect("fixture host");
-        assert_eq!(machine.status.mlx_device_observation, Some(observation));
+        let saved = machine
+            .status
+            .mlx_device_observation
+            .expect("stored report");
+        assert_eq!(saved.observed_at, observation.observed_at);
+        assert_eq!(saved.devices, observation.devices);
+        let received_at = saved.received_at.expect("database receipt time");
+        assert!(received_at >= before && received_at <= after);
         Ok(())
     }
 
@@ -5034,10 +5785,12 @@ mod test {
 
         let newer = MlxDeviceObservation {
             observed_at: "2026-09-16T16:00:01Z".parse()?,
+            received_at: None,
             devices: Vec::new(),
         };
         let older = MlxDeviceObservation {
             observed_at: "2026-09-16T16:00:00Z".parse()?,
+            received_at: None,
             devices: Vec::new(),
         };
         let mut newer_txn = pool.begin().await?;
@@ -5045,6 +5798,17 @@ mod test {
             update_mlx_device_observation(newer_txn.as_mut(), &machine_id, &newer).await?,
             Applied(())
         );
+        let accepted = super::find_one(
+            newer_txn.as_mut(),
+            &machine_id,
+            MachineSearchConfig::default(),
+        )
+        .await?
+        .expect("newer observation host")
+        .status
+        .mlx_device_observation
+        .expect("accepted report");
+        assert!(accepted.received_at.is_some());
         let mut older_txn = pool.begin().await?;
         let release_newer = async {
             // The older write must reach the locked row before the newer
@@ -5068,7 +5832,7 @@ mod test {
         let machine = super::find_one(&pool, &machine_id, MachineSearchConfig::default())
             .await?
             .expect("fixture host");
-        assert_eq!(machine.status.mlx_device_observation, Some(newer));
+        assert_eq!(machine.status.mlx_device_observation, Some(accepted));
         Ok(())
     }
 
@@ -5568,105 +6332,124 @@ mod test {
     async fn controller_state_persistence_preserves_advance_lock_order(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let machine_id =
-            MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
-        let host_id = HostMachineId::try_from(machine_id)?;
-        let mut setup_txn = pool.begin().await?;
-        super::create(
-            setup_txn.as_mut(),
-            None,
-            &machine_id,
-            ManagedHostState::Ready,
-            None,
-            2,
-        )
-        .await?;
-        setup_txn.commit().await?;
-
-        let mut legacy_txn = pool.begin().await?;
-        let machine = super::find_one(
-            legacy_txn.as_mut(),
-            &host_id,
-            MachineSearchConfig::default(),
-        )
-        .await?
-        .expect("fixture host");
-        let expected_version = machine.state.version;
-        let new_version = expected_version.increment();
-        let legacy_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(legacy_txn.as_mut())
-            .await?;
-
-        // Pause the legacy writer at the retention lock taken by `advance`.
-        sqlx::query(
-            "SELECT pg_advisory_xact_lock(\
-                hashtextextended($1, 'machine_state_history'::regclass::bigint)\
-            )",
-        )
-        .bind(host_id.to_string())
-        .execute(legacy_txn.as_mut())
-        .await?;
-
-        let mut controller_txn = pool.begin().await?;
-        let controller_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(controller_txn.as_mut())
-            .await?;
-        let controller_write = async {
-            let applied = super::try_update_controller_state(
-                controller_txn.as_mut(),
-                &host_id,
-                expected_version,
-                new_version,
-                &ManagedHostState::Ready,
+        for (scenario, prepare_completion) in [
+            ("ordinary state CAS", false),
+            ("firmware completion prerequisites and state CAS", true),
+        ] {
+            let machine_id = machine_id(if prepare_completion { 2 } else { 1 }, MachineType::Host);
+            let host_id = HostMachineId::try_from(machine_id)?;
+            let mut setup_txn = pool.begin().await?;
+            super::create(
+                setup_txn.as_mut(),
+                None,
+                &machine_id,
+                ManagedHostState::Ready,
+                None,
+                2,
             )
             .await?;
-            controller_txn.commit().await?;
-            Ok::<_, Box<dyn std::error::Error>>(applied)
-        };
-        let legacy_write = async {
-            loop {
-                let waiting: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (
+            setup_txn.commit().await?;
+
+            let mut legacy_txn = pool.begin().await?;
+            let machine = super::find_one(
+                legacy_txn.as_mut(),
+                &host_id,
+                MachineSearchConfig::default(),
+            )
+            .await?
+            .expect("fixture host");
+            let expected_version = machine.state.version;
+            let new_version = expected_version.increment();
+            let legacy_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(legacy_txn.as_mut())
+                .await?;
+
+            // Pause the legacy writer at the retention lock taken by `advance`.
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock(\
+                hashtextextended($1, 'machine_state_history'::regclass::bigint)\
+            )",
+            )
+            .bind(host_id.to_string())
+            .execute(legacy_txn.as_mut())
+            .await?;
+
+            let mut controller_txn = pool.begin().await?;
+            let controller_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(controller_txn.as_mut())
+                .await?;
+            let controller_write = async {
+                if prepare_completion {
+                    let operation = model::test_support::nic_firmware::operation();
+                    let prepared = super::prepare_nic_firmware_completion(
+                        controller_txn.as_mut(),
+                        &host_id,
+                        expected_version,
+                        &operation.purpose,
+                        None,
+                    )
+                    .await?;
+                    if let crate::ConditionalWrite::NotApplied(_) = prepared {
+                        controller_txn.rollback().await?;
+                        return Ok::<_, Box<dyn std::error::Error>>(prepared);
+                    }
+                }
+                let applied = super::try_update_controller_state(
+                    controller_txn.as_mut(),
+                    &host_id,
+                    expected_version,
+                    new_version,
+                    &ManagedHostState::Ready,
+                )
+                .await?;
+                controller_txn.commit().await?;
+                Ok::<_, Box<dyn std::error::Error>>(applied)
+            };
+            let legacy_write = async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (
                         SELECT 1 FROM pg_locks
                         WHERE pid = $1 AND locktype = 'advisory' AND NOT granted
                           AND $2 = ANY(pg_blocking_pids(pid))
                     )",
-                )
-                .bind(controller_pid)
-                .bind(legacy_pid)
-                .fetch_one(&pool)
-                .await?;
-                if waiting {
-                    break;
+                    )
+                    .bind(controller_pid)
+                    .bind(legacy_pid)
+                    .fetch_one(&pool)
+                    .await?;
+                    if waiting {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
                 }
-                tokio::task::yield_now().await;
-            }
 
-            // Waiting for history must not hold the host row. NOWAIT catches
-            // the reversed order without relying on a deadlock victim.
-            sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE NOWAIT")
-                .bind(host_id)
-                .fetch_one(legacy_txn.as_mut())
+                // Waiting for history must not hold the host row. NOWAIT catches
+                // the reversed order without relying on a deadlock victim.
+                sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE NOWAIT")
+                    .bind(host_id)
+                    .fetch_one(legacy_txn.as_mut())
+                    .await?;
+                super::advance(
+                    &machine,
+                    legacy_txn.as_mut(),
+                    &ManagedHostState::ForceDeletion,
+                    Some(new_version),
+                )
                 .await?;
-            super::advance(
-                &machine,
-                legacy_txn.as_mut(),
-                &ManagedHostState::ForceDeletion,
-                Some(new_version),
-            )
-            .await?;
-            legacy_txn.commit().await?;
-            Ok::<_, Box<dyn std::error::Error>>(())
-        };
-        let (applied, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            tokio::try_join!(controller_write, legacy_write)
-        })
-        .await??;
-        assert_eq!(
-            applied,
-            crate::ConditionalWrite::NotApplied(crate::ControllerStateNotCurrent),
-            "the controller must reject the earlier snapshot"
-        );
+                legacy_txn.commit().await?;
+                Ok::<_, Box<dyn std::error::Error>>(())
+            };
+            let (applied, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::try_join!(controller_write, legacy_write)
+            })
+            .await??;
+            assert_eq!(
+                applied,
+                crate::ConditionalWrite::NotApplied(crate::ControllerStateNotCurrent),
+                "{scenario}: the controller must reject the earlier snapshot"
+            );
+        }
         Ok(())
     }
 

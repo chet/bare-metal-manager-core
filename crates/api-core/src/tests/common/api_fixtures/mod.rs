@@ -480,6 +480,7 @@ impl TestEnv {
             }
             ManagedHostState::Ready => state.clone(),
             ManagedHostState::BootConfiguring { .. } => state.clone(),
+            ManagedHostState::NicFirmwareUpdating { .. } => state.clone(),
             ManagedHostState::Maintenance { .. } => state.clone(),
             ManagedHostState::Assigned { .. } => state.clone(),
             ManagedHostState::WaitingForCleanup { .. } => state.clone(),

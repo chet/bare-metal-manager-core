@@ -391,6 +391,28 @@ async fn test_pxe_host(pool: sqlx::PgPool) {
     .await;
     assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
 
+    // Activation returns to Scout so its reboot report and fresh NIC inventory
+    // can finish the admitted workflow rather than booting a tenant image.
+    let mut operation = model::test_support::nic_firmware::operation();
+    operation.phase = model::machine::nic_firmware::NicFirmwarePhase::Rebooting {
+        started_at: chrono::Utc::now(),
+        last_attempt_at: None,
+    };
+    move_machine_to_needed_state(
+        host_id.into(),
+        &ManagedHostState::NicFirmwareUpdating { operation },
+        &env.pool,
+    )
+    .await;
+    let instructions = get_pxe_instructions(
+        &env,
+        host_interface_id,
+        rpc::forge::MachineArchitecture::X86,
+        None,
+    )
+    .await;
+    assert!(instructions.pxe_script.contains("x86_64/scout.efi"));
+
     for reprovision_state in [
         HostReprovisionState::CheckingFirmwareV2 {
             firmware_type: None,

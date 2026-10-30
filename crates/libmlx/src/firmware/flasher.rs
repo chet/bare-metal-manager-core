@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use carbide_libmlx_model::device::identity::MlxDeviceIdentity;
 use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -35,8 +36,8 @@ use crate::firmware::error::{
     AttemptError, FirmwareApplyError, FirmwareError, FirmwarePhase, FirmwareResult,
 };
 use crate::firmware::preflight::{
-    FirmwarePreflightError, LocalFirmwareFiles, check_hardware_identity, check_readable_file,
-    inspect_prepared_firmware_with_executor, is_usable_literal,
+    FirmwarePreflightError, LocalFirmwareFiles, check_expected_device, check_hardware_identity,
+    check_readable_file, inspect_prepared_firmware_with_executor, is_usable_literal,
 };
 use crate::firmware::reset::{DEFAULT_RESET_LEVEL, MlxFwResetRunner};
 use crate::firmware::source::FirmwareSource;
@@ -171,6 +172,7 @@ pub struct FirmwareFlasher {
     progress: Option<Arc<dyn FirmwareProgress>>,
     preparation_cancel: Option<(String, watch::Receiver<Option<String>>)>,
     checked_update: bool,
+    expected_device: Option<MlxDeviceIdentity>,
 }
 
 impl FirmwareFlasher {
@@ -200,6 +202,7 @@ impl FirmwareFlasher {
             progress: None,
             preparation_cancel: None,
             checked_update: false,
+            expected_device: None,
         })
     }
 
@@ -211,9 +214,14 @@ impl FirmwareFlasher {
     }
 
     /// Select the source and preflight policy for checked updates. The operation
-    /// owner verifies expected hashes in the durable `Prepared` callback.
-    pub(super) fn with_update_validation(mut self) -> Self {
+    /// owner verifies expected hashes in the durable `Prepared` callback. A
+    /// supplied selector must match that preflight's live device before mutation.
+    pub(super) fn with_update_validation(
+        mut self,
+        expected_device: Option<MlxDeviceIdentity>,
+    ) -> Self {
         self.checked_update = true;
+        self.expected_device = expected_device;
         self
     }
 
@@ -289,8 +297,9 @@ impl FirmwareFlasher {
         if self.checked_update {
             // Both hashes are durable before the shared read-only preflight.
             // In addition to part/PSID, it checks the reported PCI function and
-            // requires a usable installed version before allowing mutation.
-            inspect_prepared_firmware_with_executor(
+            // requires a usable installed version and any frozen card identity
+            // before allowing mutation. Admission still owns the host claim.
+            let inspection = inspect_prepared_firmware_with_executor(
                 &self.device_id,
                 &self.firmware_spec,
                 LocalFirmwareFiles {
@@ -300,6 +309,9 @@ impl FirmwareFlasher {
                 &self.executor,
             )
             .await?;
+            if let Some(expected_device) = &self.expected_device {
+                check_expected_device(&inspection.device, expected_device)?;
+            }
         }
         prepared.retain = false;
         Ok(prepared)
@@ -2226,6 +2238,7 @@ esac
             progress: None,
             preparation_cancel: None,
             checked_update: false,
+            expected_device: None,
         }
         .with_dry_run(true)
     }

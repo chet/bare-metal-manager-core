@@ -222,6 +222,20 @@ message MlxDeviceReport {
   common.MachineId machine_id = 5;
 }
 
+// MlxDeviceSelector selects a device independently of its current PCI address.
+// Exactly one identity is required; omission and malformed values are rejected.
+// Matching uses the reported base MAC or literal, case-sensitive base GUID.
+message MlxDeviceSelector {
+  oneof identity {
+    // Nonzero unicast MAC, as 12 hexadecimal digits or six two-digit octets
+    // consistently separated by ':' or '-'. Output uses uppercase ':' notation.
+    string base_mac = 1;
+    // Opaque GUID with 1-256 UTF-8 bytes, without surrounding whitespace or
+    // control characters. '--' and 'N/A' are invalid absence placeholders.
+    string base_guid = 2;
+  }
+}
+
 // MlxDeviceInfo represents detailed information about a Mellanox network device.
 message MlxDeviceInfo {
   // pci_name is the PCI address or MST device path for the device.
@@ -635,7 +649,16 @@ message MlxDeviceUpdateFirmwareError {
   string diagnostic = 2;
 }
 
-// Result for exactly one delivered MlxDeviceUpdateFirmware workflow. Core must
+// A definite missing receipt in one live supervisor instance. This does not prove
+// absence in a prior instance or authorize retry after journal loss.
+message FirmwareOperationMissingReceipt {
+  // Opaque ID containing 1-256 printable nonspace ASCII bytes, generated anew
+  // at every supervisor startup. Core freezes it before initial submission and
+  // never refreshes it while resolving an uncertain operation.
+  string supervisor_instance_id = 1;
+}
+
+// Result for one MlxDeviceUpdateFirmware or MlxDeviceObserveFirmwareUpdate. Core must
 // correlate all three identifiers with its admitted task before using a receipt.
 // These results never advance legacy DPA ApplyFirmware state.
 message MlxDeviceUpdateFirmwareResult {
@@ -650,6 +673,10 @@ message MlxDeviceUpdateFirmwareResult {
   oneof result {
     FirmwareOperation receipt = 4;
     MlxDeviceUpdateFirmwareError error = 5;
+    // ObserveFirmwareUpdate returns this member on absence. A guarded
+    // UpdateFirmware also returns it when a replacement instance has no receipt,
+    // without submitting there. A prior instance may have executed the operation.
+    FirmwareOperationMissingReceipt missing_receipt = 6;
   }
 }
 
@@ -672,10 +699,27 @@ message MlxObservation {
   // Correlated generic NIC workflow result, independent of legacy DPA fields.
   // device_info may be absent: reading a receipt must not probe a live burn.
   // Must not be combined with legacy firmware/profile/lock fields.
-  // Core rejects reports containing this field with FAILED_PRECONDITION until
-  // generic-operation persistence is implemented; no observations in that batch
-  // are stored. See https://github.com/dsx-ai-factory/infra-controller/issues/6677.
+  // Core accepts only results matching its admitted operation, whole-workflow
+  // token, and frozen PCI target on the authenticated reporting host.
   MlxDeviceUpdateFirmwareResult firmware_update_result = 7;
+  // Version-bound generic access evidence. Must not be combined with firmware,
+  // legacy profile, or legacy lock fields. Successful results require device_info.
+  MlxDeviceFirmwareAccessResult firmware_access_result = 8;
+}
+
+// A reply to ReconcileFirmwareAccess on the authenticated reporting host.
+// Core accepts it only for the exact current revision, phase, target, selector,
+// and requested step. Delayed results never establish the next step's status.
+message MlxDeviceFirmwareAccessResult {
+  string controller_state_version = 1;
+  string pci_name = 2;
+  MlxDeviceSelector expected_device = 3;
+  message Changed {}
+  oneof result {
+    StatusReport status_report = 4;
+    Changed changed = 5;
+    MlxDeviceStreamError error = 6;
+  }
 }
 
 // PublishMlxObservationReportRequest is sent by scout or the agent

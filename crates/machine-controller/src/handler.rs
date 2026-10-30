@@ -150,6 +150,7 @@ mod host_boot_config;
 mod host_uefi_rotation;
 mod machine_validation;
 mod maintenance;
+mod nic_firmware;
 mod nic_lockdown_rotation;
 mod power;
 mod reset;
@@ -924,6 +925,17 @@ impl MachineStateHandler {
             }
         }
 
+        // Active firmware recovery must retain its receipts and avoid competing
+        // resets. Only safe, restored failure may honor an operator's reset.
+        if let ManagedHostState::NicFirmwareUpdating { operation } = &mh_state
+            && !(matches!(
+                operation.phase,
+                model::machine::nic_firmware::NicFirmwarePhase::Failed { .. }
+            ) && managed_host_reset_needed(mh_snapshot))
+        {
+            return nic_firmware::handle(mh_snapshot, operation, ctx).await;
+        }
+
         // `ReadyBootConfigState::Prepare` must consume a snapshot with current
         // DPU `MachineNetworkStatusObservation` values before
         // `handle_restart_verification` can issue another reboot. A pending
@@ -1111,6 +1123,9 @@ impl MachineStateHandler {
         }
 
         match &mh_state {
+            ManagedHostState::NicFirmwareUpdating { operation } => {
+                nic_firmware::handle(mh_snapshot, operation, ctx).await
+            }
             ManagedHostState::ConfigureAstra {
                 configure_astra_state,
             } => {
@@ -3430,7 +3445,11 @@ impl StateHandler for MachineStateHandler {
             && mh_snapshot.dpu_snapshots.is_empty()
         {
             let can_continue_without_dpu =
-                ready_boot_config_handles_missing_dpu_snapshots(&mh_snapshot.managed_state);
+                ready_boot_config_handles_missing_dpu_snapshots(&mh_snapshot.managed_state)
+                    || matches!(
+                        mh_snapshot.managed_state,
+                        ManagedHostState::NicFirmwareUpdating { .. }
+                    );
             if !can_continue_without_dpu {
                 tracing::error!(machine_id = %host_machine_id, "No DPU snapshot found for host");
                 return Err(StateHandlerError::GenericError(eyre!(
@@ -3438,12 +3457,13 @@ impl StateHandler for MachineStateHandler {
                 )));
             }
 
-            // `ManagedHostState::BootConfiguring` performs the complete topology
-            // DPU check. Later states return through `LockHost`, while `Prepare`
-            // waits without touching the host until the snapshot is complete.
+            // Recovery owns already-authorized hardware effects. BootConfiguring
+            // performs its own topology checks; NIC firmware retains its frozen
+            // targets and must still be able to restore access.
             tracing::warn!(
                 machine_id = %host_machine_id,
-                "Continuing ManagedHostState::BootConfiguring with missing DPU snapshots",
+                machine_state = %mh_snapshot.managed_state,
+                "Continuing hardware recovery with missing DPU snapshots",
             );
         }
 

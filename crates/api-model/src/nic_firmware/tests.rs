@@ -15,8 +15,10 @@
  * limitations under the License.
  */
 
+use carbide_libmlx_model::device::info::MlxDeviceInfo;
 use carbide_test_support::Outcome::{Fails, Yields};
 use carbide_test_support::{Case, check_cases, value_scenarios};
+use mac_address::MacAddress;
 
 use super::*;
 

@@ -23,7 +23,9 @@ use carbide_secrets::credentials::{
     NicLockdownIkm,
 };
 use carbide_uuid::dpa_interface::DpaInterfaceId;
+use carbide_uuid::machine::HostMachineId;
 use hkdf::Hkdf;
+use mac_address::MacAddress;
 use sha2::Sha256;
 use sqlx::PgPool;
 use tokio::task::JoinSet;
@@ -301,6 +303,23 @@ pub(crate) async fn build_supernic_lockdown_key(
     ikm_version: u32,
 ) -> Result<String, eyre::Report> {
     let ctx = build_kdf_context(db_reader, dpa_interface_id).await?;
+    let secret = fetch_kdf_secret(credential_reader, ikm_version).await?;
+    build_lockdown_key(secret.as_bytes(), &ctx, KdfContextVersion::V1)
+}
+
+/// Derive the same device key from an already resolved host, MAC, and IKM
+/// version. Generic NIC operations freeze this context without a DPA row;
+/// missing credentials remain an error rather than selecting another version.
+pub(crate) async fn build_resolved_lockdown_key(
+    host_machine_id: HostMachineId,
+    mac_address: MacAddress,
+    credential_reader: &dyn CredentialReader,
+    ikm_version: u32,
+) -> Result<String, eyre::Report> {
+    let ctx = KdfContext {
+        mac_address: mac_address.to_string(),
+        machine_id: host_machine_id.to_string(),
+    };
     let secret = fetch_kdf_secret(credential_reader, ikm_version).await?;
     build_lockdown_key(secret.as_bytes(), &ctx, KdfContextVersion::V1)
 }

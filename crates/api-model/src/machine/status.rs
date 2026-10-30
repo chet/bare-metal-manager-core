@@ -63,6 +63,8 @@ pub struct MachineStatus {
     pub spx_multiplane_status: Option<MachineSpxMultiplaneStatus>,
     /// Latest successful unfiltered Scout MLX report, or `None` before one is stored.
     pub mlx_device_observation: Option<MlxDeviceObservation>,
+    /// Accepted tenant-free firmware recipes and evidence retained for restoration.
+    pub nic_firmware_baseline: Option<super::nic_firmware::NicFirmwareBaseline>,
     pub extension_service_status_observations: InstanceExtensionServiceStatusObservationByType,
     pub slot_number: Option<i32>,
     pub tray_index: Option<i32>,
@@ -77,6 +79,10 @@ pub struct MachineStatus {
 pub struct MlxDeviceObservation {
     /// Time Scout generated the report, not the time Core received it.
     pub observed_at: DateTime<Utc>,
+    /// Database time when Core accepted this report. Older stored reports omit
+    /// this value; reception after an action does not prove collection after it.
+    #[serde(default)]
+    pub received_at: Option<DateTime<Utc>>,
     /// All reported devices, including entries with unavailable optional facts.
     pub devices: Vec<MlxDeviceInfo>,
 }

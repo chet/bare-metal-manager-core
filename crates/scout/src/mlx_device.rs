@@ -32,9 +32,9 @@ use libmlx::firmware::config::{
 };
 use libmlx::firmware::credentials::Credentials;
 use libmlx::firmware::operation::{
-    FirmwareOperation, FirmwareOperationState, FirmwareSupervisorClient,
-    FirmwareSupervisorClientError, ObserverExitBehavior, SupervisorConfig, SupervisorLaunchError,
-    connect_or_launch, has_unresolved_firmware_claim,
+    FirmwareOperation, FirmwareOperationObservation, FirmwareOperationState,
+    FirmwareSupervisorClient, FirmwareSupervisorClientError, ObserverExitBehavior,
+    SupervisorConfig, SupervisorLaunchError, connect_or_launch, has_unresolved_firmware_claim,
 };
 use libmlx::firmware::preflight::validate_preflight_request;
 use libmlx::lockdown::error::MlxResult;
@@ -92,6 +92,29 @@ pub(super) async fn publish_device_report_if_pending(
         },
     )
     .await;
+}
+
+/// Publish a fresh whole-host inventory through the ordinary authenticated
+/// report RPC. Filtering would replace a complete snapshot with partial facts.
+pub(super) async fn publish_requested_device_report(
+    options: &Options,
+    machine_id: MachineId,
+    request: mlx_device_pb::MlxDeviceInfoReportRequest,
+) -> CarbideClientResult<()> {
+    if request.filters.is_some() {
+        return Err(scout::CarbideClientError::GenericError(
+            "automatic NIC inventory does not accept filters".into(),
+        ));
+    }
+    let request = create_device_report_request(machine_id)
+        .await
+        .map_err(scout::CarbideClientError::GenericError)?;
+    if let Some(request) = request {
+        publish_mlx_device_report(options, request).await?;
+    }
+    // Busy hardware defers publication; Core keeps requesting inventory until
+    // a newer complete snapshot is committed, including after a lost response.
+    Ok(())
 }
 
 /// Keep the publication pending on both hardware deferral and transport errors.
@@ -1329,25 +1352,87 @@ pub(super) fn handle_config_compare(
     }
 }
 
-/// Submit the exact generic task on every delivery, including after completion.
-/// Unlike DPA polling, changed immutable inputs must fail rather than merely
-/// reading the receipt whose operation ID they reused. Host contention and
-/// transient RPC capacity defer publication; other request failures return
-/// redacted, correlated errors.
+/// Submit the frozen task, preserving Core's instance guard across reconnects.
+/// A repeated ID still checks immutable inputs, including after completion.
 pub(super) async fn update_firmware(
     device: &str,
     task: &rpc::forge_agent_control_response::MlxDeviceUpdateFirmware,
     config: &SupervisorConfig,
 ) -> Option<mlx_device_pb::MlxDeviceUpdateFirmwareResult> {
-    use mlx_device_pb::MlxDeviceUpdateFirmwareErrorCode as Code;
+    let result = submit_firmware_update(device, task, config).await;
+    firmware_update_result(device, &task.operation_id, &task.phase_id, result)
+}
+
+/// Read a receipt without submitting work or querying a card during a live burn.
+/// Only the serving instance can establish definite absence in its own journal.
+pub(super) async fn observe_firmware_update(
+    device: &str,
+    task: &rpc::forge_agent_control_response::MlxDeviceObserveFirmwareUpdate,
+    config: &SupervisorConfig,
+) -> Option<mlx_device_pb::MlxDeviceUpdateFirmwareResult> {
     use mlx_device_pb::mlx_device_update_firmware_result::Result as UpdateResult;
 
-    let result = match submit_firmware_update(device, task, config).await {
-        Ok(operation) => UpdateResult::Receipt(operation.into()),
+    let result = async {
+        validate_firmware_update_identity(device, &task.operation_id, &task.phase_id)?;
+        if task.expected_device.is_none() {
+            return Err(FirmwareSupervisorClientError::InvalidRequest(
+                "nic firmware observation requires the expected physical device".into(),
+            )
+            .into());
+        }
+        let (profile, context) = checked_firmware_update_request(
+            device,
+            &task.phase_id,
+            task.profile.clone(),
+            task.expected_digests.clone(),
+            task.expected_device.clone(),
+        )?;
+        let mut client = connect_or_launch(device, config).await?;
+        Ok(
+            match client
+                .observe_update(
+                    &task.operation_id,
+                    profile,
+                    context,
+                    ObserverExitBehavior::Continue,
+                )
+                .await?
+            {
+                FirmwareOperationObservation::Receipt(operation) => {
+                    UpdateResult::Receipt(operation.into())
+                }
+                FirmwareOperationObservation::MissingReceipt {
+                    supervisor_instance_id,
+                } => UpdateResult::MissingReceipt(mlx_device_pb::FirmwareOperationMissingReceipt {
+                    supervisor_instance_id,
+                }),
+            },
+        )
+    }
+    .await;
+    firmware_update_result(device, &task.operation_id, &task.phase_id, result)
+}
+
+/// Keep admission and observation failures on the same redacted reporting path.
+/// Capacity exhaustion defers publication; no request error authorizes replay.
+fn firmware_update_result(
+    device: &str,
+    operation_id: &str,
+    phase_id: &str,
+    result: Result<mlx_device_pb::mlx_device_update_firmware_result::Result, SupervisorLaunchError>,
+) -> Option<mlx_device_pb::MlxDeviceUpdateFirmwareResult> {
+    use mlx_device_pb::MlxDeviceUpdateFirmwareErrorCode as Code;
+
+    let result = match result {
+        Ok(result) => result,
         Err(SupervisorLaunchError::Client(FirmwareSupervisorClientError::Rpc(status)))
             if status.code() == tonic::Code::ResourceExhausted =>
         {
-            tracing::debug!(device, operation_id = %task.operation_id, "deferring NIC firmware update until supervisor capacity is available");
+            tracing::debug!(
+                device,
+                operation_id,
+                "deferring NIC firmware update until supervisor capacity is available"
+            );
             return None;
         }
         Err(error) => {
@@ -1413,15 +1498,28 @@ pub(super) async fn update_firmware(
             };
             // Local and remote errors may contain paths, URLs, or peer identity
             // strings. Keep only bounded causes and fixed messages at this boundary.
-            tracing::warn!(pci_name = device, operation_id = %task.operation_id, ?code, failure_stage, ?grpc_status_code, ?io_error_kind, diagnostic, "NIC firmware update request failed");
+            tracing::warn!(
+                pci_name = device,
+                operation_id,
+                ?code,
+                failure_stage,
+                ?grpc_status_code,
+                ?io_error_kind,
+                diagnostic,
+                "NIC firmware update request failed"
+            );
             return Some(firmware_update_request_error(
-                device, task, code, diagnostic,
+                device,
+                operation_id,
+                phase_id,
+                code,
+                diagnostic,
             ));
         }
     };
     Some(mlx_device_pb::MlxDeviceUpdateFirmwareResult {
-        operation_id: task.operation_id.clone(),
-        phase_id: task.phase_id.clone(),
+        operation_id: operation_id.to_string(),
+        phase_id: phase_id.to_string(),
         pci_name: device.to_string(),
         result: Some(result),
     })
@@ -1431,13 +1529,14 @@ pub(super) async fn update_firmware(
 /// text into the wire response. These failures never authorize a new operation ID.
 pub(super) fn firmware_update_request_error(
     device: &str,
-    task: &rpc::forge_agent_control_response::MlxDeviceUpdateFirmware,
+    operation_id: &str,
+    phase_id: &str,
     code: mlx_device_pb::MlxDeviceUpdateFirmwareErrorCode,
     diagnostic: &'static str,
 ) -> mlx_device_pb::MlxDeviceUpdateFirmwareResult {
     mlx_device_pb::MlxDeviceUpdateFirmwareResult {
-        operation_id: task.operation_id.clone(),
-        phase_id: task.phase_id.clone(),
+        operation_id: operation_id.to_string(),
+        phase_id: phase_id.to_string(),
         pci_name: device.to_string(),
         result: Some(
             mlx_device_pb::mlx_device_update_firmware_result::Result::Error(
@@ -1450,56 +1549,132 @@ pub(super) fn firmware_update_request_error(
     }
 }
 
+/// Reject malformed target and correlation fields before starting a helper.
+fn validate_firmware_update_identity(
+    device: &str,
+    operation_id: &str,
+    phase_id: &str,
+) -> Result<(), FirmwareSupervisorClientError> {
+    if operation_id.starts_with("dpa-firmware:")
+        || [operation_id, phase_id].into_iter().any(|id| {
+            id.is_empty() || id.len() > 256 || !id.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+        || discovery::normalize_pci_address(device).as_deref() != Some(device)
+    {
+        return Err(FirmwareSupervisorClientError::InvalidRequest(
+            "invalid NIC firmware update identity or target".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate before helper launch. The supervisor independently validates
 /// admission, then stages and checks the artifact bytes under its own lifetime.
 async fn submit_firmware_update(
     device: &str,
     task: &rpc::forge_agent_control_response::MlxDeviceUpdateFirmware,
     config: &SupervisorConfig,
-) -> Result<FirmwareOperation, SupervisorLaunchError> {
+) -> Result<mlx_device_pb::mlx_device_update_firmware_result::Result, SupervisorLaunchError> {
+    use mlx_device_pb::mlx_device_update_firmware_result::Result as UpdateResult;
+
     let invalid = || {
         FirmwareSupervisorClientError::InvalidRequest(
             "invalid NIC firmware update task".to_string(),
         )
     };
-    if task.operation_id.is_empty()
-        || task.operation_id.starts_with("dpa-firmware:")
-        || task.operation_id.len() > 256
-        || !task
-            .operation_id
-            .bytes()
-            .all(|byte| byte.is_ascii_graphic())
-        || device.len() != 12
-        || device.bytes().any(|byte| byte.is_ascii_uppercase())
-    {
+    validate_firmware_update_identity(device, &task.operation_id, &task.phase_id)?;
+    if task.supervisor_instance_id.as_deref().is_some_and(|id| {
+        id.is_empty() || id.len() > 256 || !id.bytes().all(|byte| byte.is_ascii_graphic())
+    }) {
         return Err(invalid().into());
     }
-    let profile: FirmwareFlasherProfile = task
-        .profile
-        .clone()
+    let (profile, context) = checked_firmware_update_request(
+        device,
+        &task.phase_id,
+        task.profile.clone(),
+        task.expected_digests.clone(),
+        task.expected_device.clone(),
+    )?;
+
+    let mut client = connect_or_launch(device, config).await?;
+    if let Some(expected_instance) = task.supervisor_instance_id.as_deref()
+        && let FirmwareOperationObservation::MissingReceipt {
+            supervisor_instance_id,
+        } = client
+            .observe_update(
+                &task.operation_id,
+                profile.clone(),
+                context.clone(),
+                ObserverExitBehavior::Continue,
+            )
+            .await?
+        && supervisor_instance_id != expected_instance
+    {
+        // Report replacement explicitly so Core can retain a visible missing
+        // receipt. Do not replace the frozen token or silently retry a burn.
+        return Ok(UpdateResult::MissingReceipt(
+            mlx_device_pb::FirmwareOperationMissingReceipt {
+                supervisor_instance_id,
+            },
+        ));
+    }
+    // Even when Observe found a receipt, Submit must check the immutable
+    // profile and digests. The server rechecks the token before new admission.
+    let operation = match task.supervisor_instance_id.as_deref() {
+        Some(instance_id) => {
+            client
+                .submit_update_on_instance(
+                    &task.operation_id,
+                    profile,
+                    context,
+                    ObserverExitBehavior::Continue,
+                    instance_id,
+                )
+                .await
+        }
+        None => {
+            client
+                .submit_update(
+                    &task.operation_id,
+                    profile,
+                    context,
+                    ObserverExitBehavior::Continue,
+                )
+                .await
+        }
+    };
+    operation
+        .map(|operation| UpdateResult::Receipt(operation.into()))
+        .map_err(SupervisorLaunchError::Client)
+}
+
+/// Convert the immutable request once for both admission and read-only polling.
+/// The optional selector preserves V1 admission; V2 observation requires it.
+fn checked_firmware_update_request(
+    device: &str,
+    phase_id: &str,
+    profile: Option<mlx_device_pb::FirmwareFlasherProfile>,
+    expected_digests: Option<mlx_device_pb::FirmwareArtifactDigests>,
+    expected_device: Option<mlx_device_pb::MlxDeviceSelector>,
+) -> Result<(FirmwareFlasherProfile, FirmwareUpdateContext), FirmwareSupervisorClientError> {
+    let invalid =
+        || FirmwareSupervisorClientError::InvalidRequest("invalid NIC firmware update task".into());
+    let profile: FirmwareFlasherProfile = profile
         .ok_or_else(invalid)?
         .try_into()
         .map_err(|_| invalid())?;
-    let expected_digests =
-        FirmwareArtifactDigests::try_from(task.expected_digests.clone().ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
     let context = FirmwareUpdateContext {
-        phase_id: task.phase_id.clone(),
-        expected_digests,
+        phase_id: phase_id.into(),
+        expected_digests: FirmwareArtifactDigests::try_from(expected_digests.ok_or_else(invalid)?)
+            .map_err(|_| invalid())?,
+        expected_device: expected_device
+            .map(TryInto::try_into)
+            .transpose()
+            .map_err(|_| invalid())?,
     };
     context.validate(&profile).map_err(|_| invalid())?;
     validate_preflight_request(device, &profile.firmware_spec).map_err(|_| invalid())?;
-
-    let mut client = connect_or_launch(device, config).await?;
-    client
-        .submit_update(
-            &task.operation_id,
-            profile,
-            context,
-            ObserverExitBehavior::Continue,
-        )
-        .await
-        .map_err(SupervisorLaunchError::Client)
+    Ok((profile, context))
 }
 
 /// `apply_firmware` reads or submits one Core state entry's durable operation.
@@ -2263,6 +2438,8 @@ mod tests {
         let task = fac::MlxDeviceUpdateFirmware {
             operation_id: "generic-update".to_string(),
             phase_id: "firmware-phase".to_string(),
+            supervisor_instance_id: None,
+            expected_device: None,
             profile: Some(
                 firmware_profile("https://firmware.example/image.bin", None, None, None).into(),
             ),
@@ -2279,6 +2456,8 @@ mod tests {
         reserved_operation_id.operation_id = "dpa-firmware:card:state-entry".to_string();
         let mut invalid_phase = task.clone();
         invalid_phase.phase_id = "invalid phase".to_string();
+        let mut invalid_instance = task.clone();
+        invalid_instance.supervisor_instance_id = Some(String::new());
         for (scenario, pci_name, task) in [
             // The old command's absent-profile completion is not this contract.
             ("required profile", DEVICE_ID, missing_profile),
@@ -2290,6 +2469,8 @@ mod tests {
             ("reserved DPA identity", DEVICE_ID, reserved_operation_id),
             // Context validation must also run before helper launch.
             ("phase context", DEVICE_ID, invalid_phase),
+            // A present but empty guard is not the V1 compatibility contract.
+            ("supervisor instance", DEVICE_ID, invalid_instance),
         ] {
             let directory = firmware_state_directory();
             let config = SupervisorConfig {
@@ -2405,6 +2586,18 @@ mod tests {
                 ))
             }
 
+            async fn observe_firmware_update(
+                &self,
+                _: Request<rpc::protos::firmware_supervisor::ObserveFirmwareUpdateRequest>,
+            ) -> Result<
+                Response<rpc::protos::firmware_supervisor::ObserveFirmwareOperationResponse>,
+                Status,
+            > {
+                Err(Status::unimplemented(
+                    "V1 submission does not observe first",
+                ))
+            }
+
             async fn get_supervisor_status(
                 &self,
                 _: Request<GetSupervisorStatusRequest>,
@@ -2414,6 +2607,7 @@ mod tests {
                     device_identity: "0000:01:00".to_string(),
                     boot_id: self.boot_id.clone(),
                     execution_device: DEVICE_ID.to_string(),
+                    supervisor_instance_id: String::new(),
                 }))
             }
         }
@@ -2518,6 +2712,8 @@ mod tests {
             let task = fac::MlxDeviceUpdateFirmware {
                 operation_id: "checked-update".to_string(),
                 phase_id: "firmware-phase".to_string(),
+                supervisor_instance_id: None,
+                expected_device: None,
                 profile: Some(
                     firmware_profile("https://firmware.example/image.bin", None, None, None).into(),
                 ),
@@ -3118,6 +3314,16 @@ mod tests {
                 ))
             }
 
+            async fn observe_firmware_update(
+                &self,
+                _: Request<rpc::protos::firmware_supervisor::ObserveFirmwareUpdateRequest>,
+            ) -> Result<
+                Response<rpc::protos::firmware_supervisor::ObserveFirmwareOperationResponse>,
+                Status,
+            > {
+                Err(Status::unimplemented("legacy polling only reads receipts"))
+            }
+
             async fn get_supervisor_status(
                 &self,
                 _: Request<GetSupervisorStatusRequest>,
@@ -3127,6 +3333,7 @@ mod tests {
                     device_identity: "0000:03:00".to_string(),
                     boot_id: self.boot_id.clone(),
                     execution_device: "0000:03:00.0".to_string(),
+                    supervisor_instance_id: String::new(),
                 }))
             }
         }
@@ -3538,6 +3745,7 @@ mod tests {
                             },
                         ),
                         update_context: None,
+                        expected_supervisor_instance_id: None,
                     }],
                     "{}",
                     case.name

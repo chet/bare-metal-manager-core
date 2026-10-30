@@ -125,6 +125,7 @@ pub(super) enum WakeupTrigger {
     RebootCompleted,
     CleanupCompleted,
     ScoutFirmwareUpgradeStatus,
+    NicFirmwareObservation,
     DpuNetworkStatus,
     BootInterfaceIntent,
 }

@@ -418,9 +418,13 @@ fn resolve_mst_pci_address(alias: &str, status: &str) -> Result<String, DeviceDi
     })
 }
 
-/// Validate a complete PCI function and add domain zero to abbreviated BDFs.
-/// Consumers use this same syntax check before matching or grouping devices.
-pub(crate) fn normalize_pci_address(device: &str) -> Option<String> {
+/// Normalize a PCI function without querying hardware.
+///
+/// Accepts ASCII `dddd:bb:ss.f` or `bb:ss.f`, with hexadecimal domain/bus/slot,
+/// slot `00` through `1f`, and function `0` through `7`. Returns lowercase with
+/// domain `0000` added only when omitted; supplied domains and functions remain
+/// unchanged. Malformed addresses and aliases such as MST paths return `None`.
+pub fn normalize_pci_address(device: &str) -> Option<String> {
     let device = match device.len() {
         7 => format!("0000:{device}"),
         12 => device.to_string(),

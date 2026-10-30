@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 // with mlxfwmanager, a device that is in lockdown won't return
 // all data (just pci_name and device_type), which can be the case
 // with DPUs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MlxDeviceInfo {
     // pci_name is the PCI address or MST device
     // path for the device.
