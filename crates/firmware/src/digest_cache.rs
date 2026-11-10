@@ -87,6 +87,10 @@ pub enum CacheError {
     /// Retained files, readers, or downloads prevent the required reservation.
     #[error("firmware cache capacity is exhausted")]
     Capacity,
+    /// The caller's release future failed. Server exclusion may already have
+    /// ended; a successful physical open is discarded before any transfer begins.
+    #[error("firmware retention fence release failed")]
+    RetentionFence,
     /// Local filesystem or blocking-worker failure.
     #[error("firmware cache I/O failed: {0}")]
     Io(#[from] io::Error),
@@ -284,11 +288,38 @@ impl FirmwareArtifactCache {
     /// even when a reduced budget is already exceeded; only new reservations
     /// require free capacity. Redirect rejection is a source security boundary,
     /// so an origin cannot substitute a different destination.
+    /// This wrapper supplies no membership fence. Callers whose authoritative
+    /// retained set can grow must use [`Self::open_with_retention_fence`].
     pub async fn open(
         &self,
         source: &Url,
         digest: ArtifactDigest,
         retained: &HashSet<ArtifactDigest>,
+    ) -> Result<CacheLookup, CacheError> {
+        self.open_with_retention_fence(source, digest, retained, async { Ok(()) })
+            .await
+    }
+
+    /// Open under the caller's authoritative retention fence. `release` owns
+    /// that fence until polled after physical eviction/reservation or reader
+    /// acquisition. Registered work retains it after request cancellation and
+    /// releases it before any source transfer or response. Release failure drops
+    /// a reader or fails a reservation and starts no download.
+    ///
+    /// Source, retention, capacity and reader rules are shared with [`Self::open`].
+    /// Use this method when authoritative membership can grow concurrently.
+    /// `release` must also clean up on drop, since rejection or panic can drop it
+    /// without polling. The caller must bound its completion; the cache supplies
+    /// no timeout, retains downloader capacity, and drains registered work during
+    /// shutdown. Early returns still poll
+    /// `release`, whose error takes precedence there. After physical work, an
+    /// existing open error takes precedence over a simultaneous release error.
+    pub async fn open_with_retention_fence(
+        &self,
+        source: &Url,
+        digest: ArtifactDigest,
+        retained: &HashSet<ArtifactDigest>,
+        release: impl Future<Output = Result<(), CacheError>> + Send + 'static,
     ) -> Result<CacheLookup, CacheError> {
         if !matches!(source.scheme(), "http" | "https")
             || source.host_str().is_none()
@@ -297,12 +328,15 @@ impl FirmwareArtifactCache {
             || source.query().is_some()
             || source.fragment().is_some()
         {
+            release.await?;
             return Err(CacheError::InvalidSource);
         }
         if self.inner.cancel.is_cancelled() {
+            release.await?;
             return Err(CacheError::Cancelled);
         }
         let Some(capacity) = self.inner.downloader.try_capacity() else {
+            release.await?;
             return Ok(CacheLookup::Pending);
         };
         let inner = self.inner.clone();
@@ -315,7 +349,18 @@ impl FirmwareArtifactCache {
         self.inner.work.register(
             async move {
                 let context = inner.clone();
-                let opened = blocking(move || context.open(digest, &retained)).await;
+                let mut opened = blocking(move || context.open(digest, &retained)).await;
+                if let Err(error) = release.await {
+                    if matches!(&opened, Ok(OpenResult::Download)) {
+                        let context = inner.clone();
+                        // No transfer started, so do not save a source failure
+                        // for the next caller's explicit retry.
+                        blocking(move || context.settle(digest, None)).await;
+                    }
+                    if opened.is_ok() {
+                        opened = Err(error);
+                    }
+                }
                 match opened {
                     Ok(OpenResult::Download) => {
                         // The request may disappear after Pending. This registered
