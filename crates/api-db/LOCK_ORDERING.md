@@ -1,9 +1,9 @@
-# Machine Network Write Locks
+# Machine Write Locks
 
-This reference describes network configuration persistence, Discovery, and IPv6
-loopback backfill. Each caller retains its locks until its transaction commits
-or rolls back. These protocols do not establish a global order for all Machine
-lifecycle operations.
+This reference describes network configuration persistence, Discovery, IPv6
+loopback backfill, DPF flags, and DPU reprovisioning requests. Each caller retains
+its locks until its transaction commits or rolls back. These protocols do not
+establish a global order for all Machine lifecycle operations.
 
 ## Network Configuration Persistence
 
@@ -124,3 +124,94 @@ without scheduling a later pass. A busy DPU can therefore remain without an
 IPv6 loopback until another startup, pool-growth request, or DPU rediscovery.
 This is bounded best-effort reconciliation, without eventual-completion or
 fairness guarantees.
+
+## DPF Flags and DPU Reprovisioning Requests
+
+`handlers::dpf::modify_dpf_state` takes a strong host `FOR UPDATE` lock before
+reading eligibility. New interface owner references require a conflicting
+foreign-key lock. Existing interfaces can change attachment or classification
+without updating the host, so `try_lock_host_interfaces` tries every existing
+host interface, including `Bmc`, in interface ID order with `FOR NO KEY UPDATE`.
+This permits foreign-key readers inserting DHCP/address records while excluding
+changes to the selected interfaces. A moved or removed selection restarts
+admission. In a separate, fresh statement, DPF reloads its configuration and
+attached DPUs and tries their rows with `FOR NO KEY UPDATE` in native Machine
+ID order. Ingestion eligibility is checked before an omitted DPU lock can
+cause a retry. Host and DPU enabled flags commit together;
+`used_for_ingestion` is preserved, and a committed host
+ingestion marker prevents disabling DPF.
+
+A rejected dependency releases the entire outer transaction, including every
+acquired host, interface, and DPU lock. `wait_for_host_interface` or
+`wait_for_machine_no_key_update` waits for that one dependency in an isolated
+transaction and rolls it back before returning. A missing dependency returns
+promptly. The handler starts a fresh transaction and reloads its complete
+selection and authorization. Retaining earlier locks while waiting can cycle
+with `handlers::dpu::record_dpu_network_status`, queued controller machine
+writes, or interface updates in Discovery.
+
+DPF database preparation has a 300-second cap from the listener's receipt
+stamp, including time in earlier authorization/admission layers. Direct handler
+calls fall back to handler entry. A valid shorter `grpc-timeout` from initial
+headers reduces the cap; request trailers cannot extend it. Pool acquisition,
+all retries and waits, and commit use this one deadline. Expiry of this cap
+returns `DeadlineExceeded` with `NICO-API-504` and drops work. The session guard
+owns the connection before `BEGIN` and discards it if work is abandoned, so an
+unfinished transaction cannot return to the pool. Successful commit or explicit
+rollback returns a healthy connection. Discarding releases local pool capacity;
+it does not guarantee immediate PostgreSQL cancellation. Abandoned server sessions
+may briefly coexist with replacements and exceed the local pool limit.
+An earlier configured admission execution or pool-acquisition limit can return
+its own error. Any timeout during commit can leave its result uncertain, even
+without `NICO-API-504`. Read host settings with `nico-admin-cli dpf show`;
+attached DPU flags require authorized database inspection before retrying an
+ambiguous result. The deadline does
+not extend to other DPF endpoints or public reprovisioning requests.
+The default CLI timeout is also 300 seconds and starts at the client. A client
+deadline can therefore hide the server's status and inspection guidance.
+
+Site Explorer's host reconciliation, inventory creation, and DPU loopback/ASN
+writers use nonblocking machine-group admission. Row contention can make them
+report `machine group for <id> changed or is busy; retry`. Their existing
+caller-specific retry policies are unchanged.
+
+Public Set uses `machine::find(for_update)` admission in C collation order and
+validates migration eligibility. Clear with a migration node uses the same
+ordered admission before its ordinary writes. Other host Clear calls and
+controller writes retain primary-first snapshot order, including approval and
+queued request starts.
+DPF and Restart release their complete transaction before waiting for a DPU, so
+that isolated wait retains none of their earlier DPU locks. Competing writers
+can still wait behind rows held by a successful attempt until it commits.
+
+Restart captures the distinct attached DPU IDs and the IDs of DPUs with pending
+requests once, before admission. It then admits the host, every host interface,
+and all current DPUs. Its helper owns each attempt from before `BEGIN` through
+commit, using the same session guard for the initial transaction and retries.
+Both Restart and DPF roll back rejected attempts and return their connections
+before an isolated dependency wait. Before persistence, Restart reloads
+aggregate host health and current requests. Changed
+attachments or pending membership return `FailedPrecondition`; missing
+host-update authorization returns `InvalidArgument`. A selected request replaced
+with another pending request remains selected; Restart merges fields into that
+current request. Machine/interface locks protect the selected rows and interfaces;
+rack health reports included in aggregate health are point-in-time reads.
+These locks do not serialize rack-report updates.
+
+`machine::restart_dpu_reprovisioning` independently locks pending rows in C
+order with `FOR NO KEY UPDATE`, deduplicates input, and rejects empty, missing,
+or cleared selection before changing any selected request. It checks complete update
+cardinality, and the caller retains the transaction through commit. Set uses
+its separate ordered admission; the two persistence paths acquire DPU rows in
+the same order. These operations acquire no history locks.
+
+Set/Clear hold their open transaction and admin-segment coordination
+locks across the bounded Kubernetes migration check and request writes.
+Releasing those locks during that read would change migration coordination.
+DPF and Restart admission can cause Discovery to return a transient
+`Unavailable` response. Other writers using `NOWAIT`, including the loopback and
+IPv6 backfill paths described above, can report `55P03` while admission holds a
+conflicting lock. Each caller determines its retry behavior. Restart does not
+enforce a total deadline across admission waits and retries. Full Set/Clear
+interface admission, repeated-interface semantics, and remaining endpoint deadlines
+belong to [the lifecycle follow-up](https://github.com/dsx-ai-factory/infra-controller/issues/8788).

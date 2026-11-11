@@ -1003,7 +1003,18 @@ type ForgeClient interface {
 	SetMaintenance(ctx context.Context, in *MaintenanceRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Set a dynamic feature, like RUST_LOG
 	SetDynamicConfig(ctx context.Context, in *SetDynamicConfigRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Trigger reprovisioning of DPU
+	// Sets, clears, or restarts DPU reprovisioning requests.
+	// Every mode requires a HostUpdateInProgress health alert classified as
+	// PreventAllocations. Restart targets a host and selects attached DPUs with
+	// stored requests, including requests whose reprovisioning has started.
+	// Restart rechecks the attached DPU set, selected pending requests, and
+	// host-update authorization after lock admission. Changed attachments or
+	// pending membership return FailedPrecondition; missing host-update
+	// authorization returns InvalidArgument; a missing host returns NotFound.
+	// Restart rejects an empty attached DPU set or stored-request selection with
+	// InvalidArgument. Replacing a selected pending request preserves its current
+	// fields except restart_reprovision_requested_at and update_firmware, which
+	// Restart overwrites. An omitted mode selects Set.
 	TriggerDpuReprovisioning(ctx context.Context, in *DpuReprovisioningRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// List DPUs waiting for reprovisioning
 	ListDpuWaitingForReprovisioning(ctx context.Context, in *DpuReprovisioningListRequest, opts ...grpc.CallOption) (*DpuReprovisioningListResponse, error)
@@ -1704,6 +1715,23 @@ type ForgeClient interface {
 	// Get position related information for machines
 	GetMachinePositionInfo(ctx context.Context, in *MachinePositionQuery, opts ...grpc.CallOption) (*MachinePositionInfoList, error)
 	NmxcBrowse(ctx context.Context, in *NmxcBrowseRequest, opts ...grpc.CallOption) (*NmxcBrowseResponse, error)
+	// Atomically sets DPF enabled flags for the current host and attached DPUs.
+	// Disabling a host ingested through DPF returns FailedPrecondition; a missing
+	// host returns NotFound. Database preparation, including pool acquisition,
+	// lock retries, isolated waits, and commit, has a 300-second cap measured
+	// from server receipt before authorization/admission. A shorter valid
+	// grpc-timeout in initial headers reduces the cap; trailers cannot extend it.
+	// The metadata accepts one to eight decimal
+	// digits followed by H (hours), M (minutes), S (seconds), m (milliseconds),
+	// u (microseconds), or n (nanoseconds); zero is valid. Missing or malformed
+	// metadata keeps the cap. This cap's expiry returns DeadlineExceeded with
+	// NICO-API-504. An earlier admission execution or pool-acquisition limit can
+	// return its own error. Abandoned connections are discarded; this does not
+	// guarantee immediate PostgreSQL cancellation. A commit already in flight
+	// may have succeeded after any timeout, even without NICO-API-504. Read host
+	// settings with nico-admin-cli dpf show; attached DPU flags require authorized
+	// database inspection before retrying an ambiguous result.
+	// A client deadline can expire before it receives the server's status.
 	ModifyDPFState(ctx context.Context, in *ModifyDPFStateRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetDPFState(ctx context.Context, in *GetDPFStateRequest, opts ...grpc.CallOption) (*DPFStateResponse, error)
 	// Curated snapshot of DPF CRs (DPUNode + DPUDevices + DPUs) for one host.
@@ -7933,7 +7961,18 @@ type ForgeServer interface {
 	SetMaintenance(context.Context, *MaintenanceRequest) (*emptypb.Empty, error)
 	// Set a dynamic feature, like RUST_LOG
 	SetDynamicConfig(context.Context, *SetDynamicConfigRequest) (*emptypb.Empty, error)
-	// Trigger reprovisioning of DPU
+	// Sets, clears, or restarts DPU reprovisioning requests.
+	// Every mode requires a HostUpdateInProgress health alert classified as
+	// PreventAllocations. Restart targets a host and selects attached DPUs with
+	// stored requests, including requests whose reprovisioning has started.
+	// Restart rechecks the attached DPU set, selected pending requests, and
+	// host-update authorization after lock admission. Changed attachments or
+	// pending membership return FailedPrecondition; missing host-update
+	// authorization returns InvalidArgument; a missing host returns NotFound.
+	// Restart rejects an empty attached DPU set or stored-request selection with
+	// InvalidArgument. Replacing a selected pending request preserves its current
+	// fields except restart_reprovision_requested_at and update_firmware, which
+	// Restart overwrites. An omitted mode selects Set.
 	TriggerDpuReprovisioning(context.Context, *DpuReprovisioningRequest) (*emptypb.Empty, error)
 	// List DPUs waiting for reprovisioning
 	ListDpuWaitingForReprovisioning(context.Context, *DpuReprovisioningListRequest) (*DpuReprovisioningListResponse, error)
@@ -8634,6 +8673,23 @@ type ForgeServer interface {
 	// Get position related information for machines
 	GetMachinePositionInfo(context.Context, *MachinePositionQuery) (*MachinePositionInfoList, error)
 	NmxcBrowse(context.Context, *NmxcBrowseRequest) (*NmxcBrowseResponse, error)
+	// Atomically sets DPF enabled flags for the current host and attached DPUs.
+	// Disabling a host ingested through DPF returns FailedPrecondition; a missing
+	// host returns NotFound. Database preparation, including pool acquisition,
+	// lock retries, isolated waits, and commit, has a 300-second cap measured
+	// from server receipt before authorization/admission. A shorter valid
+	// grpc-timeout in initial headers reduces the cap; trailers cannot extend it.
+	// The metadata accepts one to eight decimal
+	// digits followed by H (hours), M (minutes), S (seconds), m (milliseconds),
+	// u (microseconds), or n (nanoseconds); zero is valid. Missing or malformed
+	// metadata keeps the cap. This cap's expiry returns DeadlineExceeded with
+	// NICO-API-504. An earlier admission execution or pool-acquisition limit can
+	// return its own error. Abandoned connections are discarded; this does not
+	// guarantee immediate PostgreSQL cancellation. A commit already in flight
+	// may have succeeded after any timeout, even without NICO-API-504. Read host
+	// settings with nico-admin-cli dpf show; attached DPU flags require authorized
+	// database inspection before retrying an ambiguous result.
+	// A client deadline can expire before it receives the server's status.
 	ModifyDPFState(context.Context, *ModifyDPFStateRequest) (*emptypb.Empty, error)
 	GetDPFState(context.Context, *GetDPFStateRequest) (*DPFStateResponse, error)
 	// Curated snapshot of DPF CRs (DPUNode + DPUDevices + DPUs) for one host.

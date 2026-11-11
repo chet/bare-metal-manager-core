@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pooled session ownership for read-only transactions that can be abandoned.
+//! Pooled session ownership for database work that can be abandoned.
 
+use std::panic::Location;
 use std::time::Duration;
 
 use crate::{DatabaseError, Transaction};
@@ -24,11 +25,20 @@ impl DbSessionGuard {
     /// Wraps the pooled connection before `BEGIN`, so failed or cancelled
     /// transaction startup still releases its pool slot. The caller must include
     /// acquisition in its deadline; this guard installs no separate client timer.
-    pub async fn acquire(pool: &sqlx::PgPool) -> Result<Self, DatabaseError> {
-        Ok(Self {
-            connection: Some(pool.acquire().await.map_err(DatabaseError::acquire)?),
-            retention_read_open: false,
-        })
+    /// Acquisition errors retain the location that created this future.
+    #[track_caller]
+    pub fn acquire(pool: &sqlx::PgPool) -> impl Future<Output = Result<Self, DatabaseError>> {
+        let loc = Location::caller();
+        async move {
+            Ok(Self {
+                connection: Some(
+                    pool.acquire()
+                        .await
+                        .map_err(|error| DatabaseError::acquire_with_location(error, loc))?,
+                ),
+                retention_read_open: false,
+            })
+        }
     }
 
     /// Start a read-committed, read-only transaction for retention membership.
@@ -138,7 +148,8 @@ impl DbSessionGuard {
         Ok(txn)
     }
 
-    /// Returns a healthy connection through SQLx after its transaction commits.
+    /// Returns a healthy connection through SQLx after its transaction commits
+    /// or explicitly rolls back.
     /// Call this only after successful work; dropping an abandoned guard discards
     /// its connection instead of waiting for SQLx rollback cleanup.
     /// An unfinished raw retention transaction is always discarded; SQLx has no
@@ -154,10 +165,10 @@ impl Drop for DbSessionGuard {
     fn drop(&mut self) {
         if let Some(connection) = self.connection.take() {
             // Detaching frees the local pool slot immediately. Closing the
-            // socket does not guarantee that PostgreSQL stops immediately;
-            // after snapshot setup, its statement timeout separately bounds
-            // each subsequent SQL statement. Discarded server sessions may
-            // briefly remain alongside replacements and exceed the pool limit.
+            // socket does not guarantee that PostgreSQL stops immediately.
+            // Snapshot readers separately cap each SQL statement after setup.
+            // Discarded server sessions may briefly remain alongside replacements
+            // and exceed the pool limit.
             drop(connection.detach());
         }
     }
@@ -165,7 +176,108 @@ impl Drop for DbSessionGuard {
 
 #[cfg(test)]
 mod tests {
+    use sqlx::Connection as _;
+
     use super::*;
+
+    #[tokio::test]
+    async fn acquisition_errors_retain_caller_location() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unused/unused")
+            .unwrap();
+        pool.close().await;
+
+        let caller_line = line!() + 1;
+        let acquire = DbSessionGuard::acquire(&pool);
+        let DatabaseError::Sqlx(error) = acquire
+            .await
+            .err()
+            .expect("closed pool must fail acquisition")
+        else {
+            panic!("closed pool should return a SQLx error");
+        };
+        assert!(matches!(error.source, sqlx::Error::PoolClosed));
+        assert_eq!(error.query, "acquire connection");
+        assert_eq!(error.file, file!());
+        assert_eq!(error.line, caller_line);
+    }
+
+    /// Pause BEGIN after PostgreSQL enters the transaction, while SQLx still
+    /// waits for its final ReadyForQuery. Cancellation must discard that session
+    /// and let a fresh borrower use the single local pool slot before gate release.
+    #[crate::sqlx_test]
+    async fn cancelled_begin_discards_connection_before_pool_reuse(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let single = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with((*pool.connect_options()).clone())
+            .await?;
+        let mut gate = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(8907052)")
+            .execute(gate.as_mut())
+            .await?;
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(gate.as_mut())
+            .await?;
+        let mut session = DbSessionGuard::acquire(&single).await?;
+        let abandoned_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(session.as_pgconn())
+            .await?;
+        {
+            // One BEGIN batch delays ReadyForQuery without a network proxy or
+            // a timing guess. The local setting also detects accidental reuse.
+            let startup = async move {
+                let txn = session
+                    .as_pgconn()
+                    .begin_with(
+                        "BEGIN; SET LOCAL nico.cancelled_begin = 'yes'; \
+                         SELECT pg_advisory_xact_lock(8907052)",
+                    )
+                    .await?;
+                txn.rollback().await?;
+                session.return_to_pool();
+                Ok::<_, sqlx::Error>(())
+            };
+            tokio::pin!(startup);
+            let blocked_pid = tokio::select! {
+                result = &mut startup => panic!("BEGIN must still be waiting: {result:?}"),
+                pid = crate::test_support::postgres::wait_for_blocked_query(
+                    &pool, gate_pid, "BEGIN; SET LOCAL nico.cancelled_begin",
+                ) => pid,
+            };
+            assert_eq!(blocked_pid, abandoned_pid);
+        }
+        assert_eq!(single.size(), 0);
+        let (replacement_pid, marker): (i32, Option<String>) = tokio::time::timeout(
+            Duration::from_secs(5),
+            sqlx::query_as(
+                "SELECT pg_backend_pid(), current_setting('nico.cancelled_begin', true)",
+            )
+            .fetch_one(&single),
+        )
+        .await??;
+        assert_ne!(replacement_pid, abandoned_pid);
+        assert_eq!(marker, None);
+        gate.rollback().await?;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
+                )
+                .bind(abandoned_pid)
+                .fetch_one(&pool)
+                .await?;
+                if !exists {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        single.close().await;
+        Ok(())
+    }
 
     /// Snapshot setup must configure read-only, repeatable-read queries and the
     /// server cap without extending a tighter operator limit or changing the
