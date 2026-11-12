@@ -49,6 +49,9 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 use crate::cfg::file::FnnConfig;
 
+/// Leave time for the Site proxy's forty-second activity deadline to return the result.
+const CANCEL_CREATION_TIMEOUT: Duration = Duration::from_secs(35);
+
 /// `create` checks admission, prepares a VNI, then saves it with the VPC.
 /// Admission is checked again because it can change during provider work.
 pub(crate) async fn create(
@@ -60,6 +63,86 @@ pub(crate) async fn create(
     let created = created
         .ok_or_else(|| CarbideError::internal("API VPC creation skipped insertion".to_owned()))?;
     Ok(Response::new(created))
+}
+
+/// Return a committed VPC, or cancel its unfinished creation. The saved
+/// cancellation also blocks requests delayed before allocation preparation.
+/// Thirty-five seconds bounds database waits and provider cleanup together,
+/// leaving time for the Site proxy's forty-second activity deadline. A committed
+/// cancellation survives later cleanup errors. Earlier errors may leave no saved
+/// decision, so callers must retry rather than assume cancellation succeeded.
+/// No transaction spans provider I/O.
+pub(crate) async fn cancel_creation(
+    api: &Api,
+    request: Request<rpc::CancelVpcCreationRequest>,
+) -> Result<Response<rpc::CancelVpcCreationResponse>, Status> {
+    log_request_data(&request);
+    let request = request.into_inner();
+    let id = request.id.ok_or(CarbideError::MissingArgument("id"))?;
+    if request.tenant_organization_id.is_empty() {
+        return Err(CarbideError::MissingArgument("tenant_organization_id").into());
+    }
+    let cancellation = async {
+        let mut txn = database_transaction(&api.database_connection).await?;
+        db::vpc::creation::lock(&mut txn, id).await?;
+        if let Some(vpc) = db::vpc::find_by_id_including_deleted(txn.as_pgconn(), id).await? {
+            if vpc.config.tenant_organization_id != request.tenant_organization_id {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "VPC `{id}` belongs to another tenant",
+                )));
+            }
+            if vpc.deleted.is_none() {
+                let private_dns_zone = find_private_dns_zone(txn.as_pgconn(), id).await?;
+                let created_vpc = vpc_to_rpc(
+                    vpc,
+                    private_dns_zone,
+                    api.runtime_config.fnn.as_ref(),
+                    EffectiveProfileErrorPolicy::OmitRetained,
+                )?;
+                txn.commit().await?;
+                return Ok(rpc::CancelVpcCreationResponse {
+                    result: Some(rpc::cancel_vpc_creation_response::Result::CreatedVpc(
+                        created_vpc,
+                    )),
+                });
+            }
+        }
+        db::vpc::creation::cancel(&mut txn, id, &request.tenant_organization_id).await?;
+        let cleanup = api
+            .resource_pool_registry
+            .request_cancellation(
+                &mut txn,
+                resource_pool::OwnerType::Vpc,
+                &id.to_string(),
+                vni::VNI_SLOT,
+            )
+            .await?;
+        txn.commit().await?;
+        cleanup
+            .wait(
+                &api.resource_pool_registry,
+                &api.database_connection,
+                &api.cancel_token,
+            )
+            .await?;
+        Ok::<_, CarbideError>(rpc::CancelVpcCreationResponse {
+            result: Some(rpc::cancel_vpc_creation_response::Result::Cancelled(())),
+        })
+    };
+    let response = match api
+        .cancel_token
+        .run_until_cancelled(tokio::time::timeout(CANCEL_CREATION_TIMEOUT, cancellation))
+        .await
+    {
+        None => Err(CarbideError::ResourcePoolCancelled {
+            operation: "VPC creation cancellation",
+        }),
+        Some(Err(_)) => Err(CarbideError::ResourcePoolDeadlineExceeded {
+            operation: "VPC creation cancellation",
+        }),
+        Some(Ok(result)) => result,
+    }?;
+    Ok(Response::new(response))
 }
 
 /// `create_configured` uses the shared creation flow with startup's defaults.
@@ -130,7 +213,12 @@ async fn create_vpc(
     api: &Api,
     mut creation: VpcCreation,
 ) -> Result<Option<rpc::Vpc>, CarbideError> {
-    let mut txn = api.txn_begin().await?;
+    let id = match &mut creation {
+        VpcCreation::Api(request) => *request.id.get_or_insert_with(VpcId::new),
+        VpcCreation::Configured(new_vpc) => new_vpc.id,
+    };
+    let mut txn = database_transaction(&api.database_connection).await?;
+    db::vpc::creation::lock(&mut txn, id).await?;
     let CreateAdmission {
         new_vpc, internal, ..
     } = creation.admission(api, &mut txn).await?;
@@ -141,10 +229,6 @@ async fn create_vpc(
     };
     let owner_id = new_vpc.id.to_string();
     let requested_vni = new_vpc.vni;
-    // Admission must recheck the ID that owns this attempt's reservation.
-    if let VpcCreation::Api(request) = &mut creation {
-        request.id = Some(new_vpc.id);
-    }
     let map_error = |error| match error {
         ResourcePoolBackendError::Integrated(error) => {
             creation.allocation_error(&api.instrumentation, pool, &owner_id, requested_vni, error)
@@ -178,17 +262,22 @@ async fn create_vpc(
         }
         Err(error) => return Err(error.into()),
     };
-    txn.commit().await?;
-
-    let allocation = selected
-        .prepare_allocation(
-            &api.database_connection,
+    // Save creation and allocation intent under the same lock cancellation
+    // takes. A cancellation cannot miss a request that starts provider work later.
+    db::vpc::creation::begin(&mut txn, id, &new_vpc.tenant_organization_id).await?;
+    let prepared = selected
+        .prepare_foreground_request(
+            &mut txn,
             resource_pool::OwnerType::Vpc,
             &owner_id,
             vni::VNI_SLOT,
             requested_vni,
-            &api.cancel_token,
         )
+        .await
+        .map_err(map_error)?;
+    txn.commit().await?;
+    let allocation = prepared
+        .resolve(&api.database_connection, &api.cancel_token)
         .await
         .map_err(map_error)?;
 
@@ -203,6 +292,8 @@ async fn create_vpc(
         } else {
             api.txn_begin().await?
         };
+        db::vpc::creation::lock(&mut txn, id).await?;
+        db::vpc::creation::begin(&mut txn, id, &new_vpc.tenant_organization_id).await?;
         if let VpcCreation::Configured(new_vpc) = &creation {
             // Hold this lock only while checking and inserting, never during
             // provider work. Another startup may have created the name meanwhile.
@@ -211,6 +302,9 @@ async fn create_vpc(
                 .await?
                 .is_empty()
             {
+                // Startup discarded this unused ID because its named VPC exists.
+                db::vpc::creation::complete(&mut txn, id).await?;
+                txn.commit().await?;
                 return Ok(None);
             }
         }
@@ -242,6 +336,7 @@ async fn create_vpc(
                 )?
             }
         };
+        db::vpc::creation::complete(&mut txn, id).await?;
         txn.commit().await?;
         Ok::<_, CarbideError>(Some(response))
     };

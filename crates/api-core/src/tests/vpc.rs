@@ -880,6 +880,29 @@ async fn find_vpcs_by_ids_omits_retained_incompatible_effective_profile(
             .is_some()
     );
 
+    // Cancellation must return a committed VPC even if its derived routing
+    // profile became incompatible. REST can then follow ordinary deletion.
+    let cancelled = api
+        .cancel_vpc_creation(tonic::Request::new(rpc::forge::CancelVpcCreationRequest {
+            id: Some(incompatible_id),
+            tenant_organization_id: incompatible
+                .config
+                .as_ref()
+                .unwrap()
+                .tenant_organization_id
+                .clone(),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(
+        cancelled.result,
+        Some(
+            rpc::forge::cancel_vpc_creation_response::Result::CreatedVpc(
+                found_by_id[&incompatible_id].clone()
+            )
+        )
+    );
+
     // Emit one actionable warning identifying the incompatible retained VPC.
     let warning = logs
         .iter()

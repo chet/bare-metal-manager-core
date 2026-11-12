@@ -165,6 +165,19 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 		}
 
 		reportedVpcIDMap[vpc.ID] = true
+		if vpc.CreationRejectedAt != nil {
+			slogger.Warn().Msg("Core VPC shares a rejected request's ID; preserving the rejected request")
+			continue
+		}
+		if vpc.Status == cdbm.VpcStatusPending {
+			completed, completeErr := vpcDAO.CompleteCreation(ctx, vpc.ID, controllerVpc)
+			if completeErr != nil {
+				slogger.Error().Err(completeErr).Msg("failed to complete original Pending VPC from inventory")
+			} else {
+				*vpc = *completed
+			}
+			continue
+		}
 
 		// Reset missing flag if necessary
 		var isMissingOnSite *bool
@@ -402,9 +415,17 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 		}
 	}
 
-	// Loop through VPCs for deletion
+	// Missing inventory cannot settle an unfinished request or erase a saved
+	// cancellation decision. Those records remain available to their DELETE path.
 	for _, vpc := range vpcsToDelete {
 		slogger := logger.With().Str("VPC ID", vpc.ID.String()).Logger()
+		if vpc.CreationRejectedAt != nil {
+			continue
+		}
+
+		if vpc.Status == cdbm.VpcStatusPending {
+			continue
+		}
 
 		// If the VPC was already being deleted, we can proceed with removing it from the DB
 		if vpc.Status == cdbm.VpcStatusDeleting {
@@ -505,6 +526,10 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 
 		if len(matches) > 0 {
 			existingVpc := &matches[0]
+			if existingVpc.CreationRejectedAt != nil {
+				logger.Warn().Str("VPC ID", existingVpc.ID.String()).Msg("Core VPC shares a rejected request's ID; not restoring the request")
+				return nil, nil
+			}
 			if existingVpc.Deleted == nil {
 				return existingVpc, nil
 			}
@@ -659,6 +684,10 @@ func (mv ManageVpc) UpdateVpcMetadata(ctx context.Context, siteID uuid.UUID, tc 
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to retrieve VPC from DB by ID")
 		return err
+	}
+	if vpc.CreationRejectedAt != nil {
+		logger.Warn().Msg("not updating Core metadata for a rejected VPC creation")
+		return nil
 	}
 
 	logger.Info().Msg("retrieved VPC from DB")

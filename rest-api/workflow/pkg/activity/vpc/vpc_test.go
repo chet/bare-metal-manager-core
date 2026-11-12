@@ -896,6 +896,7 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 			}
 		})
 	}
+	t.Run("pending creation recovery", testManageVpcPendingCreation)
 }
 
 func TestManageVpc_UpdateVpcMetadata(t *testing.T) {
@@ -1679,4 +1680,132 @@ func Test_VpcMetrics_Delete_NoDeleting(t *testing.T) {
 
 	// Verify NO metric was emitted (no deleting status found)
 	util.TestAssertMetricExistsTimes(t, reg, "nico_rest_workflow_vpc_operation_latency_seconds", 0, nil, 0)
+}
+
+// testManageVpcPendingCreation verifies that Core inventory completes the original
+// REST record without depending on the creation workflow's retained history.
+func testManageVpcPendingCreation(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testVPCInitDB(t)
+	defer dbSession.Close()
+	testVPCSetupSchema(t, dbSession)
+	providerUser := testVPCBuildUser(t, dbSession, uuid.NewString(), "provider-org", []string{"FORGE_PROVIDER_ADMIN"})
+	provider := testVPCSiteBuildInfrastructureProvider(t, dbSession, "provider", "provider-org", providerUser)
+	creator := testVPCBuildUser(t, dbSession, uuid.NewString(), "tenant-org", []string{"FORGE_TENANT_ADMIN"})
+	tenant := testVPCBuildTenant(t, dbSession, "tenant", "tenant-org", creator)
+	site := testVPCBuildSite(t, dbSession, provider, "site", providerUser)
+	cases := []struct {
+		name       string
+		inventory  string
+		rejected   bool
+		wantStatus string
+	}{
+		// A matching VPC on a nonfinal page is enough; no workflow lookup is needed.
+		{name: "matching inventory completes the original request", inventory: "matching", wantStatus: cdbm.VpcStatusReady},
+		// Absence is inconclusive even when the saved request is old.
+		{name: "absent inventory preserves Pending intent", wantStatus: cdbm.VpcStatusPending},
+		// The same UUID does not authorize adopting different creation inputs.
+		{name: "changed inventory preserves Pending intent", inventory: "changed", wantStatus: cdbm.VpcStatusPending},
+		// A known rejection must not adopt or modify another tenant's Core VPC.
+		{name: "rejected request cannot adopt an unrelated Core VPC", inventory: "unrelated", rejected: true, wantStatus: cdbm.VpcStatusError},
+		// Ordinary missing-inventory cleanup must retain the saved rejection.
+		{name: "aged absent rejected request keeps its proof and history", rejected: true, wantStatus: cdbm.VpcStatusError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := uuid.New()
+			dao := cdbm.NewVpcDAO(dbSession)
+			saved, err := dao.Create(ctx, nil, cdbm.VpcCreateInput{
+				ID: &id, ControllerVpcID: &id, Name: tc.name, Org: tenant.Org,
+				TenantID: tenant.ID, SiteID: site.ID, InfrastructureProviderID: provider.ID,
+				Status: cdbm.VpcStatusPending, CreatedBy: *creator, Labels: map[string]string{"origin": "caller"},
+			})
+			require.NoError(t, err)
+			// Age the intent past ordinary inventory cleanup so time alone cannot
+			// erase the caller's record or turn absence into a failed creation.
+			_, err = dbSession.DB.NewUpdate().Model(saved).Set("created = ?", time.Now().Add(-24*time.Hour)).WherePK().Exec(ctx)
+			require.NoError(t, err)
+			if tc.rejected {
+				saved, err = dao.RejectCreation(ctx, id)
+				require.NoError(t, err)
+				require.NotNil(t, saved.CreationRejectedAt)
+			}
+			// Rejection updates this timestamp. Age it too so the ordinary stale-row
+			// grace period cannot hide an erroneous inventory cleanup or adoption.
+			_, err = dbSession.DB.NewUpdate().Model(saved).Set("updated = ?", time.Now().Add(-24*time.Hour)).WherePK().Exec(ctx)
+			require.NoError(t, err)
+
+			inventory := &corev1.VPCInventory{}
+			if tc.inventory != "" {
+				reported := saved.ToProto()
+				reported.Status = &corev1.VpcStatus{Vni: cutil.GetPtr(uint32(50001))}
+				switch tc.inventory {
+				case "matching":
+					inventory.InventoryPage = &corev1.InventoryPage{CurrentPage: 1, TotalPages: 2, TotalItems: 1, ItemIds: []string{id.String()}}
+				case "changed":
+					reported.Metadata.Name = "changed after Core commit"
+				case "unrelated":
+					reported.Config.TenantOrganizationId = "unrelated-tenant"
+				}
+				inventory.Vpcs = []*corev1.Vpc{reported}
+			}
+			stc := &tmocks.Client{}
+			pool := testTemporalSiteClientPool(t)
+			pool.IDClientMap[site.ID.String()] = stc
+			manager := NewManageVpc(dbSession, pool, nil)
+			_, err = manager.UpdateVpcsInDB(ctx, site.ID, inventory)
+			require.NoError(t, err)
+
+			// Reload the original row: its status may change, but its caller and
+			// request metadata must survive inventory recovery unchanged.
+			actual, err := dao.GetByID(ctx, nil, id, nil)
+			require.NoError(t, err)
+			assert.Equal(t, saved.CreatedBy, actual.CreatedBy)
+			assert.Equal(t, saved.Name, actual.Name)
+			assert.Equal(t, saved.Labels, actual.Labels)
+			assert.Equal(t, tc.wantStatus, actual.Status)
+			assert.Equal(t, saved.CreationRejectedAt, actual.CreationRejectedAt)
+			assert.False(t, actual.IsMissingOnSite)
+			details, _, err := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{id.String()}}, cdbp.PageInput{})
+			require.NoError(t, err)
+			if tc.wantStatus == cdbm.VpcStatusReady {
+				require.NotNil(t, actual.ActiveVni)
+				assert.Equal(t, 50001, *actual.ActiveVni)
+				require.Len(t, details, 1)
+				assert.Equal(t, cdbm.VpcStatusReady, details[0].Status)
+			} else {
+				assert.Nil(t, actual.ActiveVni)
+				if tc.rejected {
+					require.Len(t, details, 1)
+					assert.Equal(t, "VPC creation has stopped", *details[0].Message)
+				} else {
+					assert.Empty(t, details)
+				}
+			}
+
+			if tc.inventory == "unrelated" {
+				// Rejection also prevents outbound metadata correction or restoration
+				// of this REST row from another tenant's Core object.
+				unrelated := proto.Clone(inventory.Vpcs[0]).(*corev1.Vpc)
+				require.NoError(t, manager.UpdateVpcMetadata(ctx, site.ID, stc, id, inventory.Vpcs[0]))
+				assert.True(t, proto.Equal(unrelated, inventory.Vpcs[0]))
+			}
+			// No case reads Temporal execution history or dispatches a create.
+			assert.Empty(t, stc.Calls)
+			require.NoError(t, dao.DeleteByID(ctx, nil, id))
+			if tc.inventory == "unrelated" {
+				inventory.Vpcs[0].Config.TenantOrganizationId = saved.Org
+				util.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil), id)
+				_, err = manager.UpdateVpcsInDB(ctx, site.ID, inventory)
+				require.NoError(t, err)
+				rows, _, err := dao.GetAll(ctx, nil, cdbm.VpcFilterInput{VpcIDs: []uuid.UUID{id}, IncludeDeleted: true}, cdbp.PageInput{}, nil)
+				require.NoError(t, err)
+				require.Len(t, rows, 1)
+				assert.NotNil(t, rows[0].Deleted)
+				assert.Equal(t, saved.CreationRejectedAt, rows[0].CreationRejectedAt)
+				assert.Equal(t, saved.Name, rows[0].Name)
+				assert.Empty(t, stc.Calls)
+			}
+		})
+	}
 }

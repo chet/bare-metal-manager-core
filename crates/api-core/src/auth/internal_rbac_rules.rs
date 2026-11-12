@@ -75,6 +75,7 @@ impl InternalRBACRules {
         x.perm("DeleteDomain", vec![]);
         x.perm("FindDomain", vec![ForgeAdminCLI]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
+        x.perm("CancelVpcCreation", vec![SiteAgent, Machineatron]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ReleaseVpcInactiveVni", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ChangeVpcRoutingProfile", vec![ForgeAdminCLI, SiteAgent]);
@@ -1695,6 +1696,7 @@ mod rbac_rule_tests {
 
         // REST authorizes the caller before proxying these methods to Core as the site agent.
         for method in [
+            "CancelVpcCreation",
             "CreateCredential",
             "CreateSku",
             "DecommissionManagedHost",
