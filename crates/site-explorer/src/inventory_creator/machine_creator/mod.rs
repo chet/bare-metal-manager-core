@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use carbide_instrument::emit;
 use carbide_resource_pool::ResourcePoolRegistry;
-use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId, PredictedHostMachineId};
+use carbide_uuid::machine::{HostMachineId, MachineId, PredictedHostMachineId};
 use carbide_uuid::rack::RackId;
 use component_manager::MachineInfoProvider;
 use db::Transaction;
@@ -91,7 +91,6 @@ pub struct MachineCreator {
 struct HostDpuResources<'a> {
     existing_host: Option<HostMachineId>,
     reservations: Vec<DpuLoopbackReservation>,
-    reservations_by_dpu: HashMap<DpuMachineId, usize>,
     loopbacks: Vec<PreparedDpuLoopback<'a>>,
     asns: Vec<PreparedDpuAsn<'a>>,
 }
@@ -237,7 +236,7 @@ impl MachineCreator {
     ///
     /// Returns `true` only when new machines have been created.
     ///
-    /// Prepares DPU IPv4 loopbacks and ASNs through the configured allocators
+    /// Prepares DPU loopbacks and ASNs through the configured allocators
     /// before the machine transaction, then attaches them after interface writes.
     /// ASN allocation failures remain nonfatal; existing remote ownership is reused.
     ///
@@ -343,16 +342,38 @@ impl MachineCreator {
             let requested_loopback_v4 = reservations_by_dpu
                 .get(&machine_id)
                 .and_then(|&index| reservations[index].loopback_ipv4);
+            let requested_loopback_v6 = reservations_by_dpu
+                .get(&machine_id)
+                .and_then(|&index| reservations[index].loopback_ipv6);
             async move {
+                let loopback = async {
+                    if existing_host.is_some() {
+                        // Existing hosts skip creation before attachment, so
+                        // they need no IPv6 preparation.
+                        PreparedDpuLoopback::prepare(
+                            pool,
+                            &self.resource_pool_registry,
+                            &self.common_pools,
+                            machine_id.into(),
+                            None,
+                            &self.preparation_cancel_token,
+                        )
+                        .await
+                    } else {
+                        PreparedDpuLoopback::prepare_with_ipv6(
+                            pool,
+                            &self.resource_pool_registry,
+                            &self.common_pools,
+                            machine_id.into(),
+                            requested_loopback_v4,
+                            requested_loopback_v6,
+                            &self.preparation_cancel_token,
+                        )
+                        .await
+                    }
+                };
                 tokio::join!(
-                    PreparedDpuLoopback::prepare(
-                        pool,
-                        &self.resource_pool_registry,
-                        &self.common_pools,
-                        machine_id.into(),
-                        requested_loopback_v4,
-                        &self.preparation_cancel_token,
-                    ),
+                    loopback,
                     PreparedDpuAsn::prepare(
                         pool,
                         &self.resource_pool_registry,
@@ -367,7 +388,6 @@ impl MachineCreator {
         let mut resources = HostDpuResources {
             existing_host,
             reservations,
-            reservations_by_dpu,
             loopbacks: Vec::with_capacity(preparations.len()),
             asns: Vec::with_capacity(preparations.len()),
         };
@@ -596,12 +616,7 @@ impl MachineCreator {
         for (dpu_report, dpu_machine_id) in
             managed_host.explored_host.dpus.iter().zip(dpu_ids.iter())
         {
-            let requested_loopback_v6 = resources
-                .reservations_by_dpu
-                .get(dpu_machine_id)
-                .and_then(|&index| resources.reservations[index].loopback_ipv6);
-            self
-                .create_dpu(&mut txn, dpu_report, requested_loopback_v6)
+            self.create_dpu(&mut txn, dpu_report)
                 .await?
                 .ok_or_else(|| {
                     SiteExplorerError::internal(format!(
@@ -618,7 +633,7 @@ impl MachineCreator {
 
         // Every host link exists before the machine-group configuration updates.
         for prepared in &resources.loopbacks {
-            prepared.attach(&mut txn, true).await?;
+            prepared.attach(&mut txn).await?;
         }
         for prepared in &resources.asns {
             prepared.attach(&mut txn).await?;
@@ -922,8 +937,8 @@ impl MachineCreator {
     // configures it appropriately, returning the new `Machine`.
     // If the DPU already exists in the machines table, this is a no-op and returns `None`.
     //
-    // Optional native IPv6 is reserved with the DPU row. Prepared IPv4 and ASN
-    // resources attach after all interfaces have been written. The full network
+    // Prepared IPv4, IPv6 and ASN resources attach after all interfaces have
+    // been written. The full network
     // configuration and its group version bump wait until
     // `attach_dpu_to_host` wires the host link in `machine_interfaces`; only
     // then can `try_update_network_config` observe both siblings and keep their
@@ -932,12 +947,8 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
-        requested_loopback_v6: Option<std::net::Ipv6Addr>,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
-        if let Some(dpu_machine) = self
-            .create_dpu_machine(txn, explored_dpu, requested_loopback_v6)
-            .await?
-        {
+        if let Some(dpu_machine) = self.create_dpu_machine(txn, explored_dpu).await? {
             Self::ensure_dpu_oob_interface_ownership(txn, explored_dpu).await?;
             let dpu_machine_id: &MachineId = explored_dpu.report.machine_id.as_ref().unwrap();
             let dpu_bmc_info = explored_dpu.bmc_info();
@@ -1006,14 +1017,12 @@ impl MachineCreator {
         Ok(false)
     }
 
-    // Create the DPU row and its optional native IPv6 reservation here. Prepared
-    // IPv4 and ASN resources attach after all host interfaces exist; an existing
-    // row needs no insertion.
+    // Prepared loopbacks and ASN attach after all host interfaces exist.
+    // An existing row needs no insertion.
     async fn create_dpu_machine(
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
-        requested_loopback_v6: Option<std::net::Ipv6Addr>,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
         let dpu_machine_id = explored_dpu.report.machine_id.as_ref().unwrap();
         match db::machine::find_one(&mut *txn, dpu_machine_id, MachineSearchConfig::default())
@@ -1021,16 +1030,13 @@ impl MachineCreator {
         {
             // Do nothing if machine exists. It'll be reprovisioned via redfish
             Some(_existing_machine) => Ok(None),
-            None => match db::machine::create_with_requested_loopback(
+            None => match db::machine::create(
                 txn,
-                Some(db::machine::MachineCreationPools::Ipv6Only(
-                    &self.common_pools,
-                )),
+                None,
                 dpu_machine_id,
                 ManagedHostState::Created,
                 None,
                 CURRENT_STATE_MODEL_VERSION,
-                requested_loopback_v6,
             )
             .await
             {

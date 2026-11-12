@@ -249,12 +249,13 @@ pub(crate) async fn discover_machine(
         preflight.commit().await?;
         drop(admin_admission);
         let (loopback, asn) = tokio::join!(
-            PreparedDpuLoopback::prepare(
+            PreparedDpuLoopback::prepare_with_ipv6(
                 api.pg_pool(),
                 &api.resource_pool_registry,
                 &api.common_pools,
                 stable_machine_id,
                 reservation.as_ref().and_then(|r| r.loopback_ipv4),
+                reservation.as_ref().and_then(|r| r.loopback_ipv6),
                 &api.cancel_token,
             ),
             PreparedDpuAsn::prepare(
@@ -315,7 +316,7 @@ pub(crate) async fn discover_machine(
 
         // Preparation can call a provider outside this transaction. Reject
         // changed intent before taking admin/interface locks or attaching it.
-        let loopback_reservation = if let Some((mac, expected)) = &loopback_intent {
+        if let Some((mac, expected)) = &loopback_intent {
             let current = db::expected_dpu_loopback_reservation::find_by_dpu_oob_net0_mac_for_update(
                 &mut txn, *mac,
             ).await?;
@@ -324,10 +325,7 @@ pub(crate) async fn discover_machine(
                     "DPU loopback reservation changed during preparation; retry".to_owned(),
                 ).into());
             }
-            current
-        } else {
-            None
-        };
+        }
 
         // Segment advisory locks come before any interface row lock, so the ones
         // this transaction needs are taken before the caller interface is locked.
@@ -467,10 +465,10 @@ pub(crate) async fn discover_machine(
             let db_machine = if machine_discovery_info.create_machine {
                 let machine = db::machine::get_or_create(
                     &mut txn,
-                    Some(db::machine::MachineCreationPools::Ipv6Only(&api.common_pools)),
+                    None,
                     &stable_machine_id,
                     &caller_interface,
-                    loopback_reservation.as_ref().and_then(|r| r.loopback_ipv6),
+                    None,
                 )
                 .await?;
 
@@ -550,7 +548,7 @@ pub(crate) async fn discover_machine(
 
             // Interface rows precede the conditional machine/configuration write.
             if let Some(prepared) = &dpu_loopback {
-                match prepared.attach(&mut txn, true).await {
+                match prepared.attach(&mut txn).await {
                     Ok(()) => {}
                     Err(ResourcePoolBackendError::Database(error))
                         if error.is_lock_not_available() =>
@@ -613,7 +611,7 @@ pub(crate) async fn discover_machine(
                 let mi_id = machine_interface.id;
                 let proactive_machine = db::machine::get_or_create(
                     &mut txn,
-                    Some(db::machine::MachineCreationPools::All(&api.common_pools)),
+                    Some(&api.common_pools),
                     &predicted_machine_id,
                     &machine_interface,
                     None,
