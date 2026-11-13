@@ -3231,7 +3231,7 @@ async fn create_zero_dpu_test_env(pool: sqlx::PgPool) -> TestEnv {
     create_zero_dpu_test_env_with_overrides(pool, TestEnvOverrides::default()).await
 }
 
-async fn create_zero_dpu_test_env_with_overrides(
+pub(in crate::tests) async fn create_zero_dpu_test_env_with_overrides(
     pool: sqlx::PgPool,
     mut overrides: TestEnvOverrides,
 ) -> TestEnv {

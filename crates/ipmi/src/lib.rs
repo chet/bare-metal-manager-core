@@ -32,6 +32,19 @@ pub const DEFAULT_IPMI_PORT: u16 = 623;
 
 #[async_trait]
 pub trait IPMITool: Send + Sync + 'static {
+    /// Send one chassis reset attempt without retrying its result.
+    /// The production tool bounds the command to 60 seconds and terminates it
+    /// when the owning future is dropped. Unsupported implementations fail before sending.
+    async fn restart_once(
+        &self,
+        _bmc_address: SocketAddr,
+        _credential_key: &CredentialKey,
+    ) -> Result<(), eyre::Report> {
+        Err(eyre::eyre!(
+            "single-attempt chassis reset is not supported by this IPMI tool"
+        ))
+    }
+
     async fn bmc_cold_reset(
         &self,
         bmc_address: SocketAddr,

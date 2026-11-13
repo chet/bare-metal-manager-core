@@ -34,6 +34,7 @@ pub struct EndpointIpmiOps {
     tool: Arc<dyn IPMITool>,
     address: SocketAddr,
     credential_key: CredentialKey,
+    single_attempt: bool,
 }
 
 impl EndpointIpmiOps {
@@ -47,7 +48,14 @@ impl EndpointIpmiOps {
             tool,
             address,
             credential_key,
+            single_attempt: false,
         }
+    }
+
+    /// Give a durable controller ownership of chassis reset retries.
+    pub(crate) fn without_restart_retries(mut self) -> Self {
+        self.single_attempt = true;
+        self
     }
 
     /// Logs why `operation` failed, which `Unreachable` cannot carry. The
@@ -74,10 +82,16 @@ impl IpmiOps for EndpointIpmiOps {
     }
 
     async fn chassis_power_reset(&self) -> Result<(), PlatformError> {
-        self.tool
-            .restart(self.address, false, &self.credential_key)
-            .await
-            .map_err(|error| self.unreachable("chassis_power_reset", &error))
+        let result = if self.single_attempt {
+            self.tool
+                .restart_once(self.address, &self.credential_key)
+                .await
+        } else {
+            self.tool
+                .restart(self.address, false, &self.credential_key)
+                .await
+        };
+        result.map_err(|error| self.unreachable("chassis_power_reset", &error))
     }
 }
 

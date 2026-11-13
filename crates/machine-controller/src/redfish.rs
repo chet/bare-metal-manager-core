@@ -76,7 +76,11 @@ pub fn host_power_control(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> impl Future<Output = Result<(), PlatformError>> {
     let trigger_location = std::panic::Location::caller();
-    host_power_control_with_location(bmc, machine, action, ctx, trigger_location, None)
+    async move {
+        host_power_control_with_location(bmc, machine, action, ctx, trigger_location, None)
+            .await
+            .map(drop)
+    }
 }
 
 /// Advance lockdown recovery only after the BMC accepts the required restart.
@@ -115,6 +119,7 @@ pub(crate) fn restart_host_for_lockdown(
 
 /// Control host power and queue its accepted request. `requested_at` lets a
 /// durable workflow use its database-clock intent; other callers use Core time.
+/// Returns false when a restart was skipped because the host was powered off.
 pub async fn host_power_control_with_location(
     bmc: &BackendBmc,
     machine: &Machine<impl MachineIdSubtypeTrait>,
@@ -122,7 +127,7 @@ pub async fn host_power_control_with_location(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     trigger_location: &std::panic::Location<'_>,
     requested_at: Option<DateTime<Utc>>,
-) -> Result<(), PlatformError> {
+) -> Result<bool, PlatformError> {
     let power = bmc.power()?;
     let action = if action == ResetType::FullPowerCycle && !power.ac_power_cycle_supported().await?
     {
@@ -166,7 +171,7 @@ pub async fn host_power_control_with_location(
                 action = "Manual intervention required to initiate power-on".to_string(),
                 "Host Power Action"
             );
-            return Ok(());
+            return Ok(false);
         } else {
             power.set(action).await?;
         }
@@ -212,7 +217,7 @@ pub async fn host_power_control_with_location(
             });
     }
 
-    Ok(())
+    Ok(true)
 }
 
 const LAST_OEM_STATE_OS_IS_RUNNING: &str = "OsIsRunning";

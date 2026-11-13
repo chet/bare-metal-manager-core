@@ -37,7 +37,7 @@ async fn owning_host(
     }
 }
 
-/// Reserve before enqueue and commit before awaiting Scout. Only the dispatch
+/// Reserve before enqueue and commit before sending to hardware. Only the dispatch
 /// column is written, so no state-history lock is needed. The host row lock
 /// serializes with NIC ownership and other command reservations; typed loading
 /// prevents malformed saved evidence from being overwritten as completed.
@@ -48,8 +48,10 @@ pub async fn begin(
     token: uuid::Uuid,
     owner: &HardwareDispatchOwner,
 ) -> DatabaseResult<Option<HostMachineId>> {
-    let HardwareDispatchOwner::MlxAdmin { machine_id, .. } = owner;
-    let machine_id = *machine_id;
+    let machine_id = match owner {
+        HardwareDispatchOwner::MlxAdmin { machine_id, .. } => *machine_id,
+        HardwareDispatchOwner::InstanceReboot { machine_id, .. } => (*machine_id).into(),
+    };
     let Some(host) = owning_host(&mut *txn, machine_id).await? else {
         return Ok(None);
     };
@@ -147,6 +149,37 @@ pub async fn settle(
         .is_some())
 }
 
+/// Record an ordinary reboot attempt only while the exact pending request still owns the host.
+/// The caller holds its Instance and Machine locks and has rechecked the prepared BMC target.
+/// Returns the updated record, or None when the request changed or already settled.
+pub async fn record_instance_reboot_attempt(
+    txn: &mut PgConnection,
+    host: HostMachineId,
+    current: &HardwareDispatch,
+) -> DatabaseResult<Option<HardwareDispatch>> {
+    let mut next = current.clone();
+    let HardwareDispatchOwner::InstanceReboot {
+        last_attempt_at, ..
+    } = &mut next.owner
+    else {
+        return Err(DatabaseError::FailedPrecondition(
+            "expected an instance reboot request".into(),
+        ));
+    };
+    *last_attempt_at = Some(crate::machine::database_now(&mut *txn).await?);
+    let query = "UPDATE machines SET hardware_dispatch = $3
+                 WHERE id = $1 AND hardware_dispatch = $2
+                   AND hardware_dispatch->>'settled_at' IS NULL RETURNING hardware_dispatch";
+    Ok(sqlx::query_scalar::<_, Json<HardwareDispatch>>(query)
+        .bind(host)
+        .bind(Json(current))
+        .bind(Json(next))
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .map(|record| record.0))
+}
+
 /// Check current host exclusion while the caller holds its machine-row lock.
 /// An unknown command remains pending until its exact sender settles it.
 /// Returns false when the host or its pending record is absent.
@@ -159,6 +192,39 @@ pub async fn has_pending(db: impl DbReader<'_>, host: HostMachineId) -> Database
         .fetch_one(db)
         .await
         .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Restore an unsent reboot only after its first attempt positively reported no mutation.
+/// A caller with any earlier uncertain attempt must retain that evidence instead.
+pub async fn clear_unsent_instance_reboot_attempt(
+    txn: &mut PgConnection,
+    host: HostMachineId,
+    current: &HardwareDispatch,
+) -> DatabaseResult<()> {
+    let mut next = current.clone();
+    let HardwareDispatchOwner::InstanceReboot {
+        last_attempt_at, ..
+    } = &mut next.owner
+    else {
+        return Err(DatabaseError::FailedPrecondition(
+            "expected an instance reboot request".into(),
+        ));
+    };
+    *last_attempt_at = None;
+    let query = "UPDATE machines SET hardware_dispatch = $3 WHERE id = $1 AND hardware_dispatch = $2 AND hardware_dispatch->>'settled_at' IS NULL";
+    let result = sqlx::query(query)
+        .bind(host)
+        .bind(Json(current))
+        .bind(Json(next))
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if result.rows_affected() != 1 {
+        return Err(DatabaseError::FailedPrecondition(
+            "instance reboot ownership changed".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -191,6 +257,66 @@ mod tests {
         )
         .await
         .unwrap();
+        txn.commit().await.unwrap();
+    }
+
+    /// Neither a stale checkpoint nor a settled request can authorize another attempt.
+    #[crate::sqlx_test]
+    async fn instance_reboot_attempt_preserves_newer_and_settled_records(pool: PgPool) {
+        let host = *model::test_support::machine_snapshot::host_machine_id();
+        seed_host(&pool, host).await;
+        let token = uuid::Uuid::new_v4();
+        let owner = HardwareDispatchOwner::InstanceReboot {
+            machine_id: host,
+            instance_id: carbide_uuid::instance::InstanceId::new(),
+            bmc: model::bmc_info::BmcInfo {
+                ip: Some("192.0.2.10".parse().unwrap()),
+                mac: Some("02:00:00:00:00:01".parse().unwrap()),
+                ..Default::default()
+            },
+            last_attempt_at: None,
+        };
+        let mut txn = pool.begin().await.unwrap();
+        begin(txn.as_mut(), token, &owner).await.unwrap();
+        let queued = find(txn.as_mut(), token).await.unwrap().unwrap().1;
+        txn.commit().await.unwrap();
+
+        let mut txn = pool.begin().await.unwrap();
+        let attempted = record_instance_reboot_attempt(txn.as_mut(), host, &queued)
+            .await
+            .unwrap()
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        // A previously read request cannot replace the committed attempt checkpoint.
+        let mut txn = pool.begin().await.unwrap();
+        assert!(
+            record_instance_reboot_attempt(txn.as_mut(), host, &queued)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            find(txn.as_mut(), token).await.unwrap().unwrap().1,
+            attempted
+        );
+        assert!(
+            settle(txn.as_mut(), host, token, &attempted.owner)
+                .await
+                .unwrap()
+        );
+        let settled = find(txn.as_mut(), token).await.unwrap().unwrap().1;
+        txn.commit().await.unwrap();
+
+        // Even an exact copy of the pre-settlement checkpoint must not reopen work.
+        let mut txn = pool.begin().await.unwrap();
+        assert!(
+            record_instance_reboot_attempt(txn.as_mut(), host, &attempted)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(find(txn.as_mut(), token).await.unwrap().unwrap().1, settled);
         txn.commit().await.unwrap();
     }
 

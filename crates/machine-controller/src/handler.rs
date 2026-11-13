@@ -148,6 +148,7 @@ mod gb200_host_interface;
 mod helpers;
 mod host_boot_config;
 mod host_uefi_rotation;
+mod instance_reboot;
 mod machine_validation;
 mod maintenance;
 mod nic_firmware;
@@ -946,6 +947,12 @@ impl MachineStateHandler {
         {
             // Box both NIC dispatch paths to limit the shared transition's stack use.
             return Box::pin(nic_firmware::handle(mh_snapshot, operation, ctx)).await;
+        }
+
+        // Cancel a never-sent request after release. Reboot preparation, retries and
+        // errors run in Assigned/Ready so they cannot intercept lifecycle transitions.
+        if let Some(outcome) = instance_reboot::cancel_unsent_request(mh_snapshot, ctx).await? {
+            return Ok(outcome);
         }
 
         // `ReadyBootConfigState::Prepare` must consume a snapshot with current
@@ -3133,6 +3140,8 @@ async fn handle_restart_verification(
     // Check host first
     if let Some(last_reboot) = &mh_snapshot.host_snapshot.status.last_reboot_requested
         && last_reboot.restart_verified == Some(false)
+        // A queued reboot owns host retries, but must not suppress DPU recovery below.
+        && instance_reboot::pending_request(mh_snapshot).is_none()
     {
         let verification_attempts = last_reboot.verification_attempts.unwrap_or(0);
 
@@ -9532,7 +9541,7 @@ impl StateHandler for InstanceStateHandler {
                     // If custom_pxe_reboot_requested is set, this reboot was triggered by
                     // the tenant requested a boot with custom iPXE. Clear the request flag.
                     // The use_custom_pxe_on_boot flag was already set by the API handler.
-                    if instance.custom_pxe_reboot_requested {
+                    if instance.custom_pxe_reboot_requested && instance.deleted.is_none() {
                         ctx.pending_db_writes
                             .push(MachineWriteOp::SetCustomPxeRebootRequested {
                                 machine_id: mh_snapshot.host_snapshot.id,
@@ -9722,6 +9731,18 @@ impl StateHandler for InstanceStateHandler {
                             ctx.services.db_pool.begin().await?
                         };
 
+                        if instance.deleted.is_some()
+                            || reprov_can_be_started
+                            || host_firmware_requested
+                        {
+                            db::instance::set_custom_pxe_reboot_requested(
+                                host_machine_id,
+                                false,
+                                &mut txn,
+                            )
+                            .await?;
+                        }
+
                         if host_firmware_requested {
                             let health_override = create_host_update_health_report_hostfw();
                             // The health report alert gets generated here, the machine update manager retains responsibilty for clearing it when we're done.
@@ -9754,6 +9775,12 @@ impl StateHandler for InstanceStateHandler {
                         // Redfish I/O in a separate attempt.
                         Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
                     } else {
+                        if let Some(outcome) =
+                            Box::pin(instance_reboot::handle(mh_snapshot, ctx)).await?
+                        {
+                            // Periodic observation writes must not starve a saved reboot.
+                            return Ok(outcome);
+                        }
                         let observation_outcome =
                             boot_interface_observation::observe_verified_boot_interface(
                                 ctx,
@@ -9885,7 +9912,7 @@ impl StateHandler for InstanceStateHandler {
                     //
                     // Otherwise, follow the normal termination/reprovision flow through
                     // BootingWithDiscoveryImage.
-                    if instance.custom_pxe_reboot_requested {
+                    if instance.custom_pxe_reboot_requested && instance.deleted.is_none() {
                         if !instance
                             .config
                             .os
@@ -13955,12 +13982,37 @@ pub async fn handler_host_power_control_with_location(
     location: &std::panic::Location<'_>,
     requested_at: Option<DateTime<Utc>>,
 ) -> Result<(), StateHandlerError> {
-    let mut action = action;
     let bmc = ctx
         .services
         .connect_bmc(&managedhost_snapshot.host_snapshot)
         .await?;
+    handler_host_power_control_with_bmc(
+        managedhost_snapshot,
+        ctx,
+        bmc,
+        action,
+        location,
+        requested_at,
+        false,
+    )
+    .await
+    .map(drop)
+}
 
+/// Use a prepared client for the existing host power and vendor/IPMI handling.
+/// Returns false when power handling skips the restart for the observed state.
+/// `requested_at` preserves the caller's committed attempt time in request tracking.
+/// `single_attempt` gives a durable caller ownership of IPMI retries.
+async fn handler_host_power_control_with_bmc(
+    managedhost_snapshot: &ManagedHostStateSnapshot,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    bmc: BackendBmc,
+    action: ResetType,
+    location: &std::panic::Location<'_>,
+    requested_at: Option<DateTime<Utc>>,
+    single_attempt: bool,
+) -> Result<bool, StateHandlerError> {
+    let mut action = action;
     let power_state = power_state(&bmc)
         .await
         .map_err(|e| platform_error("get_power_state", e))?;
@@ -13969,9 +14021,10 @@ pub async fn handler_host_power_control_with_location(
         && (action == ResetType::ForceOff || action == ResetType::GracefulShutdown))
         || (power_state == Some(PowerState::On) && action == ResetType::On);
 
-    if target_power_state_reached {
+    let sent = if target_power_state_reached {
         let machine_id = &managedhost_snapshot.host_snapshot.id;
         tracing::warn!(%machine_id, ?power_state, ?action, "Target power state is already reached. Skipping power control action");
+        false
     } else {
         if power_state == Some(PowerState::Off)
             && (action == ResetType::ForceRestart || action == ResetType::GracefulRestart)
@@ -13994,7 +14047,8 @@ pub async fn handler_host_power_control_with_location(
             && matches!(bmc, BackendBmc::Libredfish(_))
             && needs_ipmi_restart(machine, ctx).await?
         {
-            do_ipmi_restart(machine, ctx, action, location, requested_at).await?;
+            do_ipmi_restart(machine, ctx, action, location, requested_at, single_attempt).await?;
+            true
         } else {
             host_power_control_with_location(&bmc, machine, action, ctx, location, requested_at)
                 .await
@@ -14003,9 +14057,9 @@ pub async fn handler_host_power_control_with_location(
                         "handler_host_power_control failed: {}",
                         e
                     ))
-                })?;
+                })?
         }
-    }
+    };
 
     // If host is forcedOff/ACPowercycled/On, it will impact DPU also. So DPU timestamp should also be updated
     // here.
@@ -14027,7 +14081,7 @@ pub async fn handler_host_power_control_with_location(
         }
     }
 
-    Ok(())
+    Ok(sent)
 }
 
 async fn restart_dpu(
@@ -14169,6 +14223,7 @@ async fn do_ipmi_restart(
     action: ResetType,
     trigger_location: &std::panic::Location<'_>,
     requested_at: Option<DateTime<Utc>>,
+    single_attempt: bool,
 ) -> Result<(), StateHandlerError> {
     tracing::info!(
         machine_id = machine.id.to_string(),
@@ -14200,13 +14255,20 @@ async fn do_ipmi_restart(
         },
     };
     let bmc_address = resolve_ipmi_address(ip, ctx).await?;
-    ctx.services
-        .ipmi_tool
-        .restart(bmc_address, false, &credential_key)
-        .await
-        .map_err(|e| {
-            StateHandlerError::GenericError(eyre!("IPMI restart failed for {}: {}", machine.id, e))
-        })?;
+    let result = if single_attempt {
+        ctx.services
+            .ipmi_tool
+            .restart_once(bmc_address, &credential_key)
+            .await
+    } else {
+        ctx.services
+            .ipmi_tool
+            .restart(bmc_address, false, &credential_key)
+            .await
+    };
+    result.map_err(|e| {
+        StateHandlerError::GenericError(eyre!("IPMI restart failed for {}: {}", machine.id, e))
+    })?;
     ctx.pending_db_writes
         .push(MachineWriteOp::UpdateRebootRequestedTime {
             machine_id: machine.id.into(),

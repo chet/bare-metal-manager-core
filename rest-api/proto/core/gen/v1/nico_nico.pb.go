@@ -21288,6 +21288,28 @@ func (x *InstancePowerRequest) GetInstanceId() *InstanceId {
 	return nil
 }
 
+// Ordinary reboots return after the BMC call by default. With
+// machine_state_controller.instance_reboot_queue_enabled=true, this acknowledges a
+// saved request, not BMC acceptance or OS boot completion. The machine controller
+// sends queued reboots during Assigned/Ready reconciliation. Custom-PXE requests in
+// Ready use the existing boot-order flow; with queueing enabled they are rejected
+// before Ready. Approving a pending update uses its existing controller flow and
+// takes precedence over custom PXE or an ordinary reboot.
+// With queueing enabled, terminating allocations, Failed provisioning, and host
+// reset/deletion reject ordinary requests with FAILED_PRECONDITION. Other Assigned
+// provisioning states retain ordinary requests until Ready or cancellation.
+// Active NIC firmware work and retained queued reboots reject competing requests
+// with FAILED_PRECONDITION even when queueing is disabled. Other unfinished hardware
+// requests block this API only while queueing is enabled.
+// An initially powered-off host is powered on. If a second power read skips a
+// restart, the request remains pending; a proven first non-send remains cancellable.
+// Uncertain attempts use failure_retry_time (minimum one minute). Automatic resends
+// honor the reboot health override and stop after fifteen retry intervals from the
+// saved request, retaining ownership for intervention. Supported fresh restart logs
+// can settle the request without another send, including after that retry window.
+// Queued controller errors appear in HostState.state_reason; an interrupted or
+// timed-out iteration can leave the request pending with diagnostics only in
+// controller logs and metrics. Disabling the queue does not cancel saved requests.
 type InstancePowerResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields

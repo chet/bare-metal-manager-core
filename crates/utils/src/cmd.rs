@@ -201,6 +201,13 @@ impl TokioCmd {
         self
     }
 
+    /// Terminate the subprocess when its owning future is dropped when enabled.
+    /// This defaults to false, matching Tokio's subprocess lifecycle.
+    pub fn kill_on_drop(mut self, enabled: bool) -> Self {
+        self.command.kill_on_drop(enabled);
+        self
+    }
+
     pub fn timeout(mut self, timeout: u64) -> Self {
         self.timeout = timeout;
         self
