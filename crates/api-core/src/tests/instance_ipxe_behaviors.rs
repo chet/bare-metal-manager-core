@@ -131,6 +131,9 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
         "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
     ));
 
+    // Finish the queued ordinary reboot before requesting a different boot mode.
+    env.run_machine_state_controller_iteration().await;
+
     // A reboot with flag `boot_with_custom_ipxe` should provide the custom iPXE
     // The reboot is handled by the state machine, which makes sure the boot order is configured properly.
     invoke_instance_power(&env, tinstance.id, true).await;

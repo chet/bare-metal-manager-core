@@ -37,7 +37,7 @@ async fn owning_host(
     }
 }
 
-/// Reserve before enqueue and commit before awaiting Scout. Only the dispatch
+/// Reserve before enqueue and commit before sending to hardware. Only the dispatch
 /// column is written, so no state-history lock is needed. The host row lock
 /// serializes with NIC ownership and other command reservations; typed loading
 /// prevents malformed saved evidence from being overwritten as completed.
@@ -48,8 +48,10 @@ pub async fn begin(
     token: uuid::Uuid,
     owner: &HardwareDispatchOwner,
 ) -> DatabaseResult<Option<HostMachineId>> {
-    let HardwareDispatchOwner::MlxAdmin { machine_id, .. } = owner;
-    let machine_id = *machine_id;
+    let machine_id = match owner {
+        HardwareDispatchOwner::MlxAdmin { machine_id, .. } => *machine_id,
+        HardwareDispatchOwner::InstanceReboot { machine_id, .. } => (*machine_id).into(),
+    };
     let Some(host) = owning_host(&mut *txn, machine_id).await? else {
         return Ok(None);
     };
@@ -145,6 +147,37 @@ pub async fn settle(
         .await
         .map_err(|error| DatabaseError::query(query, error))?
         .is_some())
+}
+
+/// Record an ordinary reboot attempt only while the exact pending request still owns the host.
+/// The caller holds its Instance and Machine locks and has rechecked the prepared BMC target.
+/// Returns the updated record, or None when the request changed or already settled.
+pub async fn record_instance_reboot_attempt(
+    txn: &mut PgConnection,
+    host: HostMachineId,
+    current: &HardwareDispatch,
+) -> DatabaseResult<Option<HardwareDispatch>> {
+    let mut next = current.clone();
+    let HardwareDispatchOwner::InstanceReboot {
+        last_attempt_at, ..
+    } = &mut next.owner
+    else {
+        return Err(DatabaseError::FailedPrecondition(
+            "expected an instance reboot request".into(),
+        ));
+    };
+    *last_attempt_at = Some(crate::machine::database_now(&mut *txn).await?);
+    let query = "UPDATE machines SET hardware_dispatch = $3
+                 WHERE id = $1 AND hardware_dispatch = $2
+                   AND hardware_dispatch->>'settled_at' IS NULL RETURNING hardware_dispatch";
+    Ok(sqlx::query_scalar::<_, Json<HardwareDispatch>>(query)
+        .bind(host)
+        .bind(Json(current))
+        .bind(Json(next))
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .map(|record| record.0))
 }
 
 /// Check current host exclusion while the caller holds its machine-row lock.
