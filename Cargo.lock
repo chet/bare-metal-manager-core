@@ -1276,6 +1276,7 @@ dependencies = [
  "bmc-backend",
  "bmc-drivers",
  "bmc-explorer",
+ "bmc-mock",
  "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
@@ -2599,6 +2600,8 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
  "tracing",
 ]
 
@@ -3343,6 +3346,7 @@ dependencies = [
  "carbide-test-support",
  "carbide-utils",
  "chrono",
+ "futures-util",
  "http",
  "libredfish",
  "mac_address",
@@ -7434,7 +7438,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.28#6145110b8cfa93c39ccc2ad40a165e2edd4c4938"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.29#d416b99a1d8f82bf069d2e3169266b999a2fe42c"
 dependencies = [
  "chrono",
  "clap",

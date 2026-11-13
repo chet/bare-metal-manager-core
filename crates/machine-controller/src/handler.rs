@@ -148,6 +148,7 @@ mod gb200_host_interface;
 mod helpers;
 mod host_boot_config;
 mod host_uefi_rotation;
+mod instance_reboot;
 mod machine_validation;
 mod maintenance;
 mod nic_firmware;
@@ -946,6 +947,12 @@ impl MachineStateHandler {
             return Box::pin(nic_firmware::handle(mh_snapshot, operation, ctx)).await;
         }
 
+        // Cancel a never-sent request after release. Reboot preparation, retries and
+        // errors run in Assigned/Ready so they cannot intercept lifecycle transitions.
+        if let Some(outcome) = instance_reboot::cancel_unsent_request(mh_snapshot, ctx).await? {
+            return Ok(outcome);
+        }
+
         // `ReadyBootConfigState::Prepare` must consume a snapshot with current
         // DPU `MachineNetworkStatusObservation` values before
         // `handle_restart_verification` can issue another reboot. A pending
@@ -961,14 +968,17 @@ impl MachineStateHandler {
             } => Some(boot_config_state),
             _ => None,
         };
-        let defer_restart_verification = active_boot_config.is_some_and(|boot_config_state| {
-            matches!(
-                boot_config_state,
-                ReadyBootConfigState::Prepare
-                    | ReadyBootConfigState::RestoreFullLockdown { .. }
-                    | ReadyBootConfigState::LockHost { .. }
-            ) || !mh_snapshot.managed_host_network_config_version_synced()
-        });
+        // A queued ordinary reboot owns host retry decisions until it settles.
+        // The generic verifier must not send a competing reset for an older request.
+        let defer_restart_verification = instance_reboot::pending_request(mh_snapshot).is_some()
+            || active_boot_config.is_some_and(|boot_config_state| {
+                matches!(
+                    boot_config_state,
+                    ReadyBootConfigState::Prepare
+                        | ReadyBootConfigState::RestoreFullLockdown { .. }
+                        | ReadyBootConfigState::LockHost { .. }
+                ) || !mh_snapshot.managed_host_network_config_version_synced()
+            });
 
         if !defer_restart_verification
             && let Some(restart_transition) = handle_restart_verification(mh_snapshot, ctx).await?
@@ -9844,6 +9854,12 @@ impl StateHandler for InstanceStateHandler {
                             };
                         }
 
+                        if matches!(&observation_outcome, StateHandlerOutcome::DoNothing { .. })
+                            && let Some(outcome) =
+                                Box::pin(instance_reboot::handle(mh_snapshot, ctx)).await?
+                        {
+                            return Ok(outcome);
+                        }
                         Ok(observation_outcome)
                     }
                 }
@@ -13909,12 +13925,37 @@ pub async fn handler_host_power_control_with_location(
     location: &std::panic::Location<'_>,
     requested_at: Option<DateTime<Utc>>,
 ) -> Result<(), StateHandlerError> {
-    let mut action = action;
     let bmc = ctx
         .services
         .connect_bmc(&managedhost_snapshot.host_snapshot)
         .await?;
+    handler_host_power_control_with_bmc(
+        managedhost_snapshot,
+        ctx,
+        bmc,
+        action,
+        location,
+        requested_at,
+        false,
+    )
+    .await
+    .map(drop)
+}
 
+/// Use a prepared client for the existing host power and vendor/IPMI handling.
+/// Returns false when power handling skips the restart for the observed state.
+/// `requested_at` preserves the caller's committed attempt time in request tracking.
+/// `single_attempt` gives a durable caller ownership of IPMI retries.
+async fn handler_host_power_control_with_bmc(
+    managedhost_snapshot: &ManagedHostStateSnapshot,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    bmc: BackendBmc,
+    action: ResetType,
+    location: &std::panic::Location<'_>,
+    requested_at: Option<DateTime<Utc>>,
+    single_attempt: bool,
+) -> Result<bool, StateHandlerError> {
+    let mut action = action;
     let power_state = power_state(&bmc)
         .await
         .map_err(|e| platform_error("get_power_state", e))?;
@@ -13923,9 +13964,10 @@ pub async fn handler_host_power_control_with_location(
         && (action == ResetType::ForceOff || action == ResetType::GracefulShutdown))
         || (power_state == Some(PowerState::On) && action == ResetType::On);
 
-    if target_power_state_reached {
+    let sent = if target_power_state_reached {
         let machine_id = &managedhost_snapshot.host_snapshot.id;
         tracing::warn!(%machine_id, ?power_state, ?action, "Target power state is already reached. Skipping power control action");
+        false
     } else {
         if power_state == Some(PowerState::Off)
             && (action == ResetType::ForceRestart || action == ResetType::GracefulRestart)
@@ -13948,7 +13990,8 @@ pub async fn handler_host_power_control_with_location(
             && matches!(bmc, BackendBmc::Libredfish(_))
             && needs_ipmi_restart(machine, ctx).await?
         {
-            do_ipmi_restart(machine, ctx, action, location, requested_at).await?;
+            do_ipmi_restart(machine, ctx, action, location, requested_at, single_attempt).await?;
+            true
         } else {
             host_power_control_with_location(&bmc, machine, action, ctx, location, requested_at)
                 .await
@@ -13957,9 +14000,9 @@ pub async fn handler_host_power_control_with_location(
                         "handler_host_power_control failed: {}",
                         e
                     ))
-                })?;
+                })?
         }
-    }
+    };
 
     // If host is forcedOff/ACPowercycled/On, it will impact DPU also. So DPU timestamp should also be updated
     // here.
@@ -13981,7 +14024,7 @@ pub async fn handler_host_power_control_with_location(
         }
     }
 
-    Ok(())
+    Ok(sent)
 }
 
 async fn restart_dpu(
@@ -14123,6 +14166,7 @@ async fn do_ipmi_restart(
     action: ResetType,
     trigger_location: &std::panic::Location<'_>,
     requested_at: Option<DateTime<Utc>>,
+    single_attempt: bool,
 ) -> Result<(), StateHandlerError> {
     tracing::info!(
         machine_id = machine.id.to_string(),
@@ -14154,13 +14198,20 @@ async fn do_ipmi_restart(
         },
     };
     let bmc_address = resolve_ipmi_address(ip, ctx).await?;
-    ctx.services
-        .ipmi_tool
-        .restart(bmc_address, false, &credential_key)
-        .await
-        .map_err(|e| {
-            StateHandlerError::GenericError(eyre!("IPMI restart failed for {}: {}", machine.id, e))
-        })?;
+    let result = if single_attempt {
+        ctx.services
+            .ipmi_tool
+            .restart_once(bmc_address, &credential_key)
+            .await
+    } else {
+        ctx.services
+            .ipmi_tool
+            .restart(bmc_address, false, &credential_key)
+            .await
+    };
+    result.map_err(|e| {
+        StateHandlerError::GenericError(eyre!("IPMI restart failed for {}: {}", machine.id, e))
+    })?;
     ctx.pending_db_writes
         .push(MachineWriteOp::UpdateRebootRequestedTime {
             machine_id: machine.id.into(),

@@ -155,6 +155,15 @@ impl IPMIToolHttpImpl {
 
 #[async_trait]
 impl IPMITool for IPMIToolHttpImpl {
+    async fn restart_once(
+        &self,
+        bmc_address: SocketAddr,
+        credential_key: &CredentialKey,
+    ) -> Result<(), eyre::Report> {
+        self.execute_action(IpmiCommand::ChassisPowerReset, bmc_address, credential_key)
+            .await
+    }
+
     async fn bmc_cold_reset(
         &self,
         bmc_address: SocketAddr,

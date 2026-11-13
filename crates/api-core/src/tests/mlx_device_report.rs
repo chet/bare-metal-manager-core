@@ -2024,6 +2024,40 @@ async fn live_mlx_hardware_dispatch_survives_a_lost_caller(pool: sqlx::PgPool) {
     assert_eq!(settled.token, saved.token);
     assert_eq!(settled.owner, saved.owner);
     assert!(settled.settled_at.is_some());
+
+    // A retained ordinary reboot can share this host's stream identity, but an
+    // exact-token MLX success still cannot establish its completion.
+    let current = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let reboot_owner = HardwareDispatchOwner::InstanceReboot {
+        machine_id: host_id,
+        instance_id: carbide_uuid::instance::InstanceId::new(),
+        bmc: current.status.bmc_info,
+        last_attempt_at: Some(chrono::Utc::now()),
+    };
+    let reboot_token = uuid::Uuid::new_v4();
+    let mut txn = env.pool.begin().await.unwrap();
+    db::hardware_dispatch::begin(txn.as_mut(), reboot_token, &reboot_owner)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    let reboot = saved_dispatch(&env.pool, host_id).await;
+    other_sender
+        .send(config_set_reply(Some(reboot_token.into())))
+        .await
+        .unwrap();
+    ping_barrier(&env.api, host_machine, &other_sender, &mut other_requests).await;
+    assert_eq!(saved_dispatch(&env.pool, host_id).await, reboot);
+    assert!(reboot.is_pending());
+
+    // The shared public MLX entrypoint also respects that other owner's exclusion.
+    let error = dispatch_config_set(&env.api, host_machine)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(saved_dispatch(&env.pool, host_id).await, reboot);
 }
 
 /// Drive the public mutation boundary without repeating its request fixture.

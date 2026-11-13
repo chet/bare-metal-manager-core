@@ -3774,6 +3774,17 @@ message InstancePowerRequest {
   common.InstanceId instance_id = 5;
 }
 
+// Ordinary reboots return after the BMC call by default. With
+// machine_state_controller.instance_reboot_queue_enabled=true, this acknowledges a
+// saved request, not BMC acceptance or OS boot completion. The machine controller
+// sends queued reboots during Assigned/Ready reconciliation. Custom-PXE and update
+// requests use their existing controller flows.
+// An unfinished hardware command or NIC firmware operation rejects the request with
+// FAILED_PRECONDITION. This also applies when retrying after a lost response if the
+// original queued reboot is still pending.
+// Queued controller errors appear in HostState.state_reason; an interrupted or
+// timed-out iteration can leave the request pending with diagnostics only in
+// controller logs and metrics. Disabling the queue does not cancel saved requests.
 message InstancePowerResult {
 }
 
