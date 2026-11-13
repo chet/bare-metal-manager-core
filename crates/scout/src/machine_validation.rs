@@ -55,9 +55,7 @@ async fn get_system_manufacturer_name() -> String {
             if output.stdout.is_empty() {
                 "default".to_string()
             } else {
-                let sku = String::from_utf8_lossy(&output.stdout)
-                    .to_string()
-                    .replace('\n', "");
+                let sku = String::from_utf8_lossy(&output.stdout).replace('\n', "");
 
                 let re = Regex::new(r"[ =;:@#\!?\-]").unwrap();
                 re.replace_all(&sku, "_").to_string().to_ascii_lowercase()

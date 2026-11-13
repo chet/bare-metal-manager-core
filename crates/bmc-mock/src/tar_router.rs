@@ -77,7 +77,7 @@ pub(super) fn tar_router(
                 TarGzOption::Disk(path) => {
                     _owned_gz_data = Some(
                         std::fs::read(path)
-                            .wrap_err(format!("cannot read file by path: {path:?}"))?,
+                            .wrap_err_with(|| format!("cannot read file by path: {path:?}"))?,
                     );
                     GzDecoder::new(_owned_gz_data.as_ref().unwrap().reader())
                 }

@@ -239,7 +239,7 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
         "firmware_version": "5.10",
     });
     let _ = sqlx::query(query)
-        .bind(host_machine_id.to_string())
+        .bind(host_machine_id)
         .bind(sqlx::types::Json(bmc_info))
         .execute(txn.deref_mut())
         .await?;
@@ -261,7 +261,7 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
 
     let query = "UPDATE machine_topologies SET topology = jsonb_set(topology, '{bmc_info}',  '{\"mac\": \"C8:4B:D6:7A:DB:66\", \"port\": null, \"version\": \"1\", \"firmware_version\": \"5.10\"}', false) WHERE machine_id = $1";
     let _ = sqlx::query(query)
-        .bind(host_machine_id.to_string())
+        .bind(host_machine_id)
         .execute(txn.deref_mut())
         .await?;
     txn.commit().await?;

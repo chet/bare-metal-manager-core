@@ -185,19 +185,13 @@ impl EventScope {
     }
 
     fn is_event_path(&self, path: &syn::Path) -> bool {
-        let segments = path
-            .segments
-            .iter()
-            .map(|segment| segment.ident.to_string())
-            .collect::<Vec<_>>();
-        match segments.as_slice() {
-            [name] => self.direct_names.contains(name),
-            [crate_name, event]
-                if event == "Event"
-                    && (crate_name == "carbide_instrument"
-                        || self.crate_aliases.contains(crate_name)) =>
-            {
-                true
+        let segments = &path.segments;
+        match segments.len() {
+            1 => self.direct_names.contains(&segments[0].ident.to_string()),
+            2 => {
+                segments[1].ident == "Event"
+                    && (segments[0].ident == "carbide_instrument"
+                        || self.crate_aliases.contains(&segments[0].ident.to_string()))
             }
             _ => false,
         }

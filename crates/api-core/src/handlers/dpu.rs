@@ -532,7 +532,7 @@ async fn get_managed_host_network_config_inner(
         HardwareInfoScope::WithoutComponents,
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: dpu_machine_id.to_string(),
     })?;
@@ -748,7 +748,7 @@ async fn get_managed_host_network_config_inner(
                 )
                 .await?
                 .pop()
-                .ok_or(CarbideError::NotFoundError {
+                .ok_or_else(|| CarbideError::NotFoundError {
                     kind: "NetworkSecurityGroup",
                     id: tenant_id.to_string(),
                 })?;
@@ -1691,7 +1691,7 @@ async fn process_dpu_network_status(
     if let Some(policy) = dpu_agent_upgrade_policy::get(&mut txn).await? {
         let upgrade_status = db::machine::find_dpu_agent_upgrade_status(&mut txn, &dpu_machine_id)
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: dpu_machine_id.to_string(),
             })?;
@@ -1846,7 +1846,7 @@ pub(crate) async fn dpu_agent_upgrade_check(
 
     let machine =
         db::machine::find_one(&mut txn, &dpu_machine_id, MachineSearchConfig::default()).await?;
-    let machine = machine.ok_or(CarbideError::NotFoundError {
+    let machine = machine.ok_or_else(|| CarbideError::NotFoundError {
         kind: "dpu",
         id: machine_id.to_string(),
     })?;
@@ -2189,7 +2189,7 @@ async fn load_dpu_reprovisioning_snapshot(
         },
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: machine_id.to_string(),
     })

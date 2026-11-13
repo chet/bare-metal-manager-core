@@ -383,7 +383,7 @@ mod tests {
             run = |(left, right)| {
                 let left = from_hardware_info_with_type(&left, MachineType::Host).unwrap();
                 let right = from_hardware_info_with_type(&right, MachineType::Host).unwrap();
-                left.to_string() == right.to_string()
+                left == right
             };
             "same TPM cert and type yields the same id string" {
                 (

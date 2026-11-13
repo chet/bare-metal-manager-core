@@ -45,20 +45,17 @@ impl Debug for PxeRequestError {
 
 impl Display for PxeRequestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            match self {
-                Self::CarbideApiError(err) => format!("Error making a carbide API request: {err}"),
-                Self::MissingClientConfig =>
-                    "Missing client configuration from server config (should not reach this case)"
-                        .to_string(),
-                Self::InvalidBuildArch =>
-                    "Invalid build arch specified in URI parameter buildarch".to_string(),
-                Self::MalformedBuildArch(err) => format!("Malformed build arch: {err}"),
-                Self::MissingIp(err) => format!("Source IP is missing. Error: {err:?}"),
+        match self {
+            Self::CarbideApiError(err) => write!(f, "Error making a carbide API request: {err}"),
+            Self::MissingClientConfig => f.write_str(
+                "Missing client configuration from server config (should not reach this case)",
+            ),
+            Self::InvalidBuildArch => {
+                f.write_str("Invalid build arch specified in URI parameter buildarch")
             }
-        )
+            Self::MalformedBuildArch(err) => write!(f, "Malformed build arch: {err}"),
+            Self::MissingIp(err) => write!(f, "Source IP is missing. Error: {err:?}"),
+        }
     }
 }
 

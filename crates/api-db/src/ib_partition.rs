@@ -94,7 +94,7 @@ pub async fn create(
         .bind(sqlx::types::Json(&value.metadata.labels))
         .bind(&value.metadata.description)
         .bind(status.pkey.map(|k| u16::from(k) as i32))
-        .bind(conf.tenant_organization_id.to_string())
+        .bind(&conf.tenant_organization_id)
         .bind::<i32>(conf.mtu.clone().unwrap_or_default().into())
         .bind::<i32>(conf.rate_limit.clone().unwrap_or_default().into())
         .bind::<i32>(conf.service_level.clone().unwrap_or_default().into())

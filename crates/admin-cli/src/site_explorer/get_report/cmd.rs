@@ -158,7 +158,7 @@ async fn get_exploration_report_for_bmc_address(
     // get managed host with host bmc
     let mut managed_host = api_client
         .0
-        .find_explored_managed_hosts_by_ids(std::slice::from_ref(&ip.to_string()))
+        .find_explored_managed_hosts_by_ids(std::slice::from_ref(ip))
         .await?
         .managed_hosts;
 

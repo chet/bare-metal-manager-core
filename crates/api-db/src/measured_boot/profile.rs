@@ -286,8 +286,7 @@ pub async fn create_measurement_profile(
                     },
                     sqlx::error::ErrorKind::NotNullViolation => DatabaseError::internal(format!(
                         "system profile missing not null value: {} (msg: {})",
-                        profile_name.clone(),
-                        db_err
+                        profile_name, db_err
                     )),
                     _ => DatabaseError::new("MeasurementSystemProfile.new db_err", sqlx_err),
                 },

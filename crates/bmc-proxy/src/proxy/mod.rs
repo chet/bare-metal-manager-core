@@ -183,7 +183,7 @@ pub(crate) async fn start(
     let BmcProxyParams { config } = params;
 
     tracing::info!(
-        listen_address = config.listen.to_string(),
+        listen_address = %config.listen,
         build_version = carbide_version::v!(build_version),
         build_date = carbide_version::v!(build_date),
         rust_version = carbide_version::v!(rust_version),

@@ -70,7 +70,7 @@ impl serde::Serialize for PartitionKey {
     where
         S: serde::Serializer,
     {
-        self.to_string().serialize(s)
+        s.collect_str(self)
     }
 }
 
@@ -79,11 +79,7 @@ impl<'de> serde::Deserialize<'de> for PartitionKey {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
-        let str_value = String::deserialize(deserializer)?;
-        let version =
-            PartitionKey::from_str(&str_value).map_err(|err| Error::custom(err.to_string()))?;
-        Ok(version)
+        crate::deserialize_from_str(deserializer)
     }
 }
 
@@ -110,7 +106,7 @@ impl FromStr for PartitionKey {
         // construction path agrees on what a valid pkey is.
         match u16::from_str_radix(p, base) {
             Ok(v) => PartitionKey::try_from(v),
-            Err(_e) => Err(InvalidPartitionKeyError(pkey.to_string())),
+            Err(_e) => Err(InvalidPartitionKeyError(pkey)),
         }
     }
 }
@@ -127,7 +123,7 @@ impl TryFrom<&String> for PartitionKey {
     type Error = InvalidPartitionKeyError;
 
     fn try_from(pkey: &String) -> Result<Self, Self::Error> {
-        PartitionKey::try_from(pkey.to_string())
+        PartitionKey::from_str(pkey)
     }
 }
 
@@ -135,7 +131,7 @@ impl TryFrom<&str> for PartitionKey {
     type Error = InvalidPartitionKeyError;
 
     fn try_from(pkey: &str) -> Result<Self, Self::Error> {
-        PartitionKey::try_from(pkey.to_string())
+        PartitionKey::from_str(pkey)
     }
 }
 

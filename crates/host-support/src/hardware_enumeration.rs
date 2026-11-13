@@ -743,7 +743,7 @@ fn enumerate_hardware_inner(
         // e.g. 'DRAM'. We will use this later if smbios fails.
         backup_ram_type = device
             .property_value(MEMORY_TYPE)
-            .map(|v| v.to_string_lossy().to_string());
+            .map(|v| v.to_string_lossy().into_owned());
 
         if device
             .property_value(PCI_DEV_PATH)

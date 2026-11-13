@@ -70,7 +70,11 @@ pub struct SwitchId {
 
 impl Ord for SwitchId {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.to_string().cmp(&other.to_string())
+        self.ty
+            .id_char()
+            .cmp(&other.ty.id_char())
+            .then_with(|| self.source.id_char().cmp(&other.source.id_char()))
+            .then_with(|| self.hardware_id.cmp(&other.hardware_id))
     }
 }
 
@@ -102,7 +106,7 @@ impl sqlx::Encode<'_, sqlx::Postgres> for SwitchId {
         &self,
         buf: &mut <Postgres as Database>::ArgumentBuffer,
     ) -> Result<IsNull, BoxDynError> {
-        buf.extend(self.to_string().as_bytes());
+        std::io::Write::write_fmt(&mut **buf, format_args!("{self}"))?;
         Ok(sqlx::encode::IsNull::No)
     }
 }
@@ -379,7 +383,7 @@ impl Serialize for SwitchId {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        serializer.collect_str(self)
     }
 }
 
@@ -388,11 +392,7 @@ impl<'de> Deserialize<'de> for SwitchId {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
-
-        let str_value = String::deserialize(deserializer)?;
-        let id = SwitchId::from_str(&str_value).map_err(|err| Error::custom(err.to_string()))?;
-        Ok(id)
+        crate::deserialize_from_str(deserializer)
     }
 }
 
@@ -429,7 +429,7 @@ impl prost::Message for SwitchId {
     }
 
     fn encoded_len(&self) -> usize {
-        legacy_rpc::SwitchId::from(*self).encoded_len()
+        crate::string_field_len(SWITCH_ID_LENGTH)
     }
 
     #[allow(deprecated)]
@@ -472,6 +472,38 @@ mod tests {
     use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn ordering_matches_canonical_text() {
+        for (scenario, left, right) in [
+            (
+                "source precedes hardware",
+                SwitchId::new(
+                    SwitchIdSource::ProductBoardChassisSerial,
+                    [0xff; 32],
+                    SwitchType::NvLink,
+                ),
+                SwitchId::new(SwitchIdSource::Tpm, [0; 32], SwitchType::NvLink),
+            ),
+            (
+                "hardware breaks a prefix tie",
+                SwitchId::new(SwitchIdSource::Tpm, [0x55; 32], SwitchType::NvLink),
+                SwitchId::new(SwitchIdSource::Tpm, [0xff; 32], SwitchType::NvLink),
+            ),
+        ] {
+            assert_eq!(
+                left.cmp(&right),
+                left.to_string().cmp(&right.to_string()),
+                "{scenario}"
+            );
+            assert_eq!(
+                right.cmp(&left),
+                right.to_string().cmp(&left.to_string()),
+                "{scenario}"
+            );
+            assert_eq!(left.cmp(&left), Ordering::Equal, "{scenario}");
+        }
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     enum ParseFailure {

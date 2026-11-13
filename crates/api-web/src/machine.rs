@@ -392,7 +392,7 @@ async fn fetch_instance_type_names(
 
     let mut result = HashMap::new();
     for instance_type in instance_types {
-        if let Some(name) = instance_type.metadata.as_ref().map(|m| m.name.clone()) {
+        if let Some(name) = instance_type.metadata.map(|m| m.name) {
             result.insert(instance_type.id, name);
         }
     }
@@ -1052,7 +1052,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
                 m.state_sla,
             ),
             last_reboot: to_time(status.last_reboot_time, Some(&machine_id))
-                .unwrap_or("N/A".to_string()),
+                .unwrap_or_else(|| "N/A".to_string()),
             metadata_detail: super::MetadataDetail {
                 metadata: m.metadata.unwrap_or_default(),
                 metadata_version: m.version,
@@ -1089,7 +1089,9 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             capabilities_json: status
                 .capabilities
                 .as_ref()
-                .map(|set| serde_json::to_string_pretty(set).unwrap_or("Invalid JSON".to_string()))
+                .map(|set| {
+                    serde_json::to_string_pretty(set).unwrap_or_else(|_| "Invalid JSON".to_string())
+                })
                 .unwrap_or_else(|| "{}".to_string()),
             capabilities: status
                 .capabilities

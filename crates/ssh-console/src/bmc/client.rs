@@ -307,7 +307,7 @@ impl BmcClient {
             let error_string = res
                 .err()
                 .map(|e| format!("{e:?}"))
-                .unwrap_or("<none>".to_string());
+                .unwrap_or_else(|| "<none>".to_string());
             tracing::warn!(
                 %machine_id,
                 error = error_string,

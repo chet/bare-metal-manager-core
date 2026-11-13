@@ -264,7 +264,7 @@ impl Serialize for SerializableMacAddress {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.0.to_string())
+        serializer.collect_str(&self.0)
     }
 }
 
@@ -273,14 +273,64 @@ impl<'de> Deserialize<'de> for SerializableMacAddress {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
+        struct StringVisitor;
 
-        let str_value = String::deserialize(deserializer)?;
-        let mac: MacAddress = str_value
-            .parse()
-            .map_err(|_| Error::custom(format!("Invalid MAC address: {str_value}")))?;
-        Ok(SerializableMacAddress(mac))
+        impl serde::de::Visitor<'_> for StringVisitor {
+            type Value = SerializableMacAddress;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                value
+                    .parse()
+                    .map(SerializableMacAddress)
+                    .map_err(|_| E::custom(format!("Invalid MAC address: {value}")))
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
+        }
+
+        deserializer.deserialize_str(StringVisitor)
     }
+}
+
+fn deserialize_from_str<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+    D: serde::Deserializer<'de>,
+{
+    struct StringVisitor<T>(std::marker::PhantomData<T>);
+
+    impl<T> serde::de::Visitor<'_> for StringVisitor<T>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<T, E> {
+            value.parse().map_err(E::custom)
+        }
+
+        fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<T, E> {
+            let value = std::str::from_utf8(value)
+                .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+            self.visit_str(value)
+        }
+    }
+
+    deserializer.deserialize_str(StringVisitor(std::marker::PhantomData))
 }
 
 /// Specifies the SLA for a resource in a specific state
@@ -366,6 +416,71 @@ mod tests {
     }
 
     #[test]
+    fn dpu_model_display_uses_stable_spellings() {
+        value_scenarios!(run = |model: DpuModel| model.to_string();
+            "BF2" { DpuModel::BlueField2 => "bluefield2".to_string(), }
+            "BF3" { DpuModel::BlueField3 => "bluefield3".to_string(), }
+            "unknown" { DpuModel::Unknown => "unknown".to_string(), }
+        );
+    }
+
+    #[test]
+    fn text_models_preserve_reader_owned_and_byte_inputs() {
+        fn check<T: serde::de::DeserializeOwned + Serialize>(text: &str, expected: &str) {
+            use serde::de::value::{
+                BorrowedBytesDeserializer, Error, StrDeserializer, StringDeserializer,
+            };
+
+            let json = serde_json::to_string(text).unwrap();
+            let escaped = json.replacen(&text[..1], &format!("\\u{:04x}", text.as_bytes()[0]), 1);
+            let cases = [
+                (
+                    "reader",
+                    serde_json::from_reader::<_, T>(json.as_bytes()).map_err(|e| e.to_string()),
+                ),
+                (
+                    "escaped",
+                    serde_json::from_str::<T>(&escaped).map_err(|e| e.to_string()),
+                ),
+                (
+                    "transient",
+                    T::deserialize(StrDeserializer::<Error>::new(text)).map_err(|e| e.to_string()),
+                ),
+                (
+                    "owned",
+                    T::deserialize(StringDeserializer::<Error>::new(text.to_string()))
+                        .map_err(|e| e.to_string()),
+                ),
+                (
+                    "bytes",
+                    T::deserialize(BorrowedBytesDeserializer::<Error>::new(text.as_bytes()))
+                        .map_err(|e| e.to_string()),
+                ),
+            ];
+            for (scenario, parsed) in cases {
+                assert_eq!(
+                    serde_json::to_string(&parsed.unwrap()).unwrap(),
+                    expected,
+                    "{scenario}"
+                );
+            }
+            let error = T::deserialize(BorrowedBytesDeserializer::<Error>::new(&[0xff]))
+                .err()
+                .unwrap();
+            let expected_error =
+                String::deserialize(BorrowedBytesDeserializer::<Error>::new(&[0xff])).unwrap_err();
+            assert_eq!(error.to_string(), expected_error.to_string());
+        }
+
+        check::<SerializableMacAddress>("0A:02:03:04:05:FF", r#""0A:02:03:04:05:FF""#);
+        check::<crate::ib_partition::PartitionKey>("0x7ABC", r#""0x7abc""#);
+        check::<crate::hardware_info::TpmEkCertificate>("AAH/", r#""AAH/""#);
+        check::<crate::errors::ErrorCode>("NICO-SITEEXPLORER-145", r#""NICO-SITEEXPLORER-145""#);
+        check::<crate::rack_type::RackProductFamily>(" gb400 ", r#""gb400""#);
+        check::<crate::nic_firmware::NicFirmwareProfileId>("profile-v1", r#""profile-v1""#);
+    }
+
+    #[test]
     fn serialize_mac_address() {
         let mac = MacAddress::new([1, 2, 3, 4, 5, 6]);
         let serialized = serde_json::to_string(&SerializableMacAddress::from(mac)).unwrap();
@@ -402,6 +517,10 @@ where
 
 impl fmt::Display for DpuModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", format!("{self:?}").to_lowercase())
+        f.write_str(match self {
+            Self::BlueField2 => "bluefield2",
+            Self::BlueField3 => "bluefield3",
+            Self::Unknown => "unknown",
+        })
     }
 }

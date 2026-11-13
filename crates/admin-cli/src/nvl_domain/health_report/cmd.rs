@@ -80,9 +80,9 @@ fn display_health_reports(
 
     let mut rows = Vec::new();
     for entry in entries {
-        let report = entry.report.ok_or(CarbideCliError::GenericError(
-            "missing response".to_string(),
-        ))?;
+        let report = entry
+            .report
+            .ok_or_else(|| CarbideCliError::GenericError("missing response".to_string()))?;
         let mode = match forgerpc::HealthReportApplyMode::try_from(entry.mode)
             .map_err(|_| CarbideCliError::GenericError("invalid response".to_string()))?
         {

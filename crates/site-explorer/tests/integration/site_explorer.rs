@@ -2972,7 +2972,8 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
     assert_eq!(
         test_meter
             .formatted_metric("carbide_endpoint_exploration_duration_milliseconds_count")
-            .unwrap_or("2".to_string()),
+            .as_deref()
+            .unwrap_or("2"),
         "2"
     );
     assert_eq!(
@@ -3037,7 +3038,8 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
     assert_eq!(
         test_meter
             .formatted_metric("carbide_endpoint_exploration_duration_milliseconds_count")
-            .unwrap_or("4".to_string()),
+            .as_deref()
+            .unwrap_or("4"),
         "4"
     );
     assert_eq!(
@@ -3980,7 +3982,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
         &mut txn,
         ExpectedMachine {
             id: None,
-            bmc_mac_address: HOST1_BMC_MAC.to_string().parse().unwrap(),
+            bmc_mac_address: HOST1_BMC_MAC.parse().unwrap(),
             data: ExpectedMachineData {
                 bmc_username: "user1".to_string(),
                 bmc_password: "pw".to_string(),

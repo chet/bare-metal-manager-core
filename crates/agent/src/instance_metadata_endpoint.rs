@@ -331,7 +331,7 @@ fn extract_metadata(
             },
             SITENAME_CATEGORY => (
                 StatusCode::OK,
-                metadata.sitename.clone().unwrap_or(String::new()),
+                metadata.sitename.clone().unwrap_or_default(),
             ),
             USER_DATA_CATEGORY => (StatusCode::OK, metadata.user_data.clone()),
             ASN_CATEGORY => (StatusCode::OK, network_config.asn.to_string()),
@@ -511,10 +511,12 @@ async fn get_instance_attributes(
         let mut response = String::new();
 
         if let Some(_ib_guid) = &inst.ib_guid {
-            response += &(GUID.to_owned() + "\n")
+            response.push_str(GUID);
+            response.push('\n');
         }
         if let Some(_ib_partition_id) = &inst.ib_partition_id {
-            response += &(IB_PARTITION.to_owned() + "\n")
+            response.push_str(IB_PARTITION);
+            response.push('\n');
         }
         response.push_str(LID);
 

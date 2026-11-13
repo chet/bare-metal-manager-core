@@ -66,15 +66,16 @@ pub(super) async fn trigger(args: Args, api_client: &ApiClient) -> CarbideCliRes
         "Attestation triggered for machine {}",
         res.machine_id
             .map(|e| e.to_string())
-            .unwrap_or("No MachineId returned".to_string())
+            .unwrap_or_else(|| "No MachineId returned".to_string())
     );
     println!("  outcome:        {}", outcome(res.outcome));
     println!("  devices:        {}", res.devices_under_attestation);
     println!(
         "  job ID:         {}",
         res.job_id
-            .map(|id| id.value)
-            .unwrap_or_else(|| "none".to_string())
+            .as_ref()
+            .map(|id| id.value.as_str())
+            .unwrap_or("none")
     );
     // Empty when exploration has recorded no class, which is itself an outcome.
     println!(

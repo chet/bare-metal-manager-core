@@ -704,7 +704,7 @@ impl MachineValidation {
             "Executing machine validation command",
         );
         TokioCmd::new("sh")
-            .args(vec!["-c".to_string(), command_string])
+            .args(["-c", &command_string])
             .timeout(DEFAULT_TIMEOUT)
             .output_with_timeout()
             .await
@@ -991,14 +991,11 @@ impl MachineValidation {
 
         // Check pre_condition
         if test.pre_condition.is_some() {
-            match TokioCmd::new(test.pre_condition.clone().unwrap_or("/bin/true".to_owned()))
+            match TokioCmd::new(test.pre_condition.as_deref().unwrap_or("/bin/true"))
                 .timeout(DEFAULT_TIMEOUT)
-                .env("CONTEXT".to_owned(), in_context.clone())
-                .env(
-                    "MACHINE_VALIDATION_RUN_ID".to_owned(),
-                    validation_id.to_string(),
-                )
-                .env("MACHINE_ID".to_owned(), machine_id.to_string())
+                .env("CONTEXT", &in_context)
+                .env("MACHINE_VALIDATION_RUN_ID", validation_id.to_string())
+                .env("MACHINE_ID", machine_id.to_string())
                 .output_with_timeout()
                 .await
             {
@@ -1032,15 +1029,15 @@ impl MachineValidation {
                 command_string = format!("chroot /host /bin/bash -c \"{command_string}\"");
             }
             let _ = self
-                .pull_container(&test.img_name.clone().unwrap_or_default())
+                .pull_container(test.img_name.as_deref().unwrap_or_default())
                 .await;
-            let ctr_arg = test.container_arg.clone().unwrap_or("".to_string());
+            let ctr_arg = test.container_arg.as_deref().unwrap_or_default();
             command_string = format!(
                 "ctr run --rm --privileged --no-pivot \
                 --mount type=bind,src=/,dst=/host,options=rbind:rw {} \
                 {} runner {}",
                 ctr_arg,
-                test.img_name.clone().unwrap_or_default(),
+                test.img_name.as_deref().unwrap_or_default(),
                 command_string
             );
         };
@@ -1070,14 +1067,11 @@ impl MachineValidation {
         }
 
         let command_result = TokioCmd::new("sh")
-            .args(vec!["-c".to_string(), command_string])
+            .args(["-c", &command_string])
             .timeout(test.timeout.unwrap_or(7200).try_into().unwrap())
-            .env("CONTEXT".to_owned(), in_context.clone())
-            .env(
-                "MACHINE_VALIDATION_RUN_ID".to_owned(),
-                validation_id.to_string(),
-            )
-            .env("MACHINE_ID".to_owned(), machine_id.to_string())
+            .env("CONTEXT", &in_context)
+            .env("MACHINE_VALIDATION_RUN_ID", validation_id.to_string())
+            .env("MACHINE_ID", machine_id.to_string())
             .output_with_timeout()
             .await;
 

@@ -21,6 +21,7 @@
  */
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write;
 
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::{MeasurementBundleId, MeasurementSystemProfileId};
@@ -85,8 +86,7 @@ pub async fn new(
                     },
                     sqlx::error::ErrorKind::NotNullViolation => DatabaseError::internal(format!(
                         "bundle missing not null value: {} (msg: {})",
-                        bundle_name.clone(),
-                        db_err
+                        bundle_name, db_err
                     )),
                     _ => DatabaseError::new("MeasurementBundle.new db_err", sqlx_err),
                 },
@@ -551,9 +551,10 @@ async fn find_closest_bundle(
 
     let matching = get_matching_bundles(&all_bundles, values)?;
     if !matching.is_empty() {
-        let matching_bundle_ids = matching.iter().fold(String::new(), |acc, bundle| {
-            acc + " " + bundle.bundle_id.to_string().as_str()
-        });
+        let mut matching_bundle_ids = String::new();
+        for bundle in &matching {
+            write!(matching_bundle_ids, " {}", bundle.bundle_id).unwrap();
+        }
         return Err(DatabaseError::InvalidArgument(format!(
             "Fully matching bundle(s) found: {matching_bundle_ids}"
         )));

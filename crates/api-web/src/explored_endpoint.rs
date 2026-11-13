@@ -245,7 +245,7 @@ pub(super) async fn show_html_all(
     let vendor_filter = params
         .get("vendor-filter")
         .cloned()
-        .unwrap_or("all".to_string());
+        .unwrap_or_else(|| "all".to_string());
     let is_errors_only = params
         .get("errors-only")
         .and_then(|v| v.parse::<bool>().ok())
@@ -368,7 +368,7 @@ pub(super) async fn show_html_unpaired(
     let vendor_filter = params
         .get("vendor-filter")
         .cloned()
-        .unwrap_or("all".to_string());
+        .unwrap_or_else(|| "all".to_string());
     let is_errors_only = params
         .get("errors-only")
         .and_then(|v| v.parse::<bool>().ok())

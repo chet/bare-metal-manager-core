@@ -206,7 +206,6 @@ async fn poll_power_state(
         }
     };
 
-    let rack_id_str = rack_id.to_string();
     let results = match component_manager
         .power_shelf
         .get_power_state(std::slice::from_ref(&endpoint))
@@ -216,7 +215,7 @@ async fn poll_power_state(
         Err(error) => {
             tracing::warn!(
                 power_shelf_id = %power_shelf_id,
-                rack_id = %rack_id_str,
+                rack_id = %rack_id,
                 backend = component_manager.power_shelf.name(),
                 error = %error,
                 "Power shelf get power state transport error",
@@ -230,7 +229,7 @@ async fn poll_power_state(
             let observed_power_state = observed_power_state.to_string().to_lowercase();
             tracing::info!(
                 power_shelf_id = %power_shelf_id,
-                rack_id = %rack_id_str,
+                rack_id = %rack_id,
                 backend = component_manager.power_shelf.name(),
                 power_state = %observed_power_state,
                 "Power shelf get power state succeeded",
@@ -240,7 +239,7 @@ async fn poll_power_state(
         PowerStatePollOutcome::BackendError(error) => {
             tracing::warn!(
                 power_shelf_id = %power_shelf_id,
-                rack_id = %rack_id_str,
+                rack_id = %rack_id,
                 backend = component_manager.power_shelf.name(),
                 error = %error,
                 "Power shelf get power state returned an error result",

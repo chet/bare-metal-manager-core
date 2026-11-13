@@ -342,9 +342,9 @@ async fn assign_static_address_inner(
     request: Request<rpc::AssignStaticAddressRequest>,
 ) -> Result<Response<rpc::AssignStaticAddressResponse>, CarbideError> {
     let req = request.into_inner();
-    let interface_id = req.interface_id.ok_or(CarbideError::InvalidArgument(
-        "interface_id is required".into(),
-    ))?;
+    let interface_id = req
+        .interface_id
+        .ok_or_else(|| CarbideError::InvalidArgument("interface_id is required".into()))?;
     let ip_address: std::net::IpAddr = req.ip_address.parse()?;
 
     let mut txn = api.txn_begin().await?;
@@ -447,9 +447,9 @@ async fn remove_static_address_inner(
     request: Request<rpc::RemoveStaticAddressRequest>,
 ) -> Result<Response<rpc::RemoveStaticAddressResponse>, CarbideError> {
     let req = request.into_inner();
-    let interface_id = req.interface_id.ok_or(CarbideError::InvalidArgument(
-        "interface_id is required".into(),
-    ))?;
+    let interface_id = req
+        .interface_id
+        .ok_or_else(|| CarbideError::InvalidArgument("interface_id is required".into()))?;
     let ip_address: std::net::IpAddr = req.ip_address.parse()?;
 
     let mut txn = api.txn_begin().await?;
@@ -495,9 +495,9 @@ pub(crate) async fn find_interface_addresses(
     request: Request<rpc::FindInterfaceAddressesRequest>,
 ) -> Result<Response<rpc::FindInterfaceAddressesResponse>, Status> {
     let req = request.into_inner();
-    let interface_id = req.interface_id.ok_or(CarbideError::InvalidArgument(
-        "interface_id is required".into(),
-    ))?;
+    let interface_id = req
+        .interface_id
+        .ok_or_else(|| CarbideError::InvalidArgument("interface_id is required".into()))?;
 
     let mut txn = api.txn_begin().await?;
     let addresses =

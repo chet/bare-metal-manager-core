@@ -94,7 +94,7 @@ macro_rules! impl_sqlx_for_machine_id_newtype {
                 &self,
                 buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
             ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-                buf.extend(self.to_string().as_bytes());
+                std::io::Write::write_fmt(&mut **buf, format_args!("{self}"))?;
                 Ok(sqlx::encode::IsNull::No)
             }
         }
@@ -271,8 +271,8 @@ fn merge_machine_id(
     Ok(())
 }
 
-fn encoded_machine_id_len(id: &MachineId) -> usize {
-    prost::Message::encoded_len(&legacy_rpc::MachineId::from(*id))
+fn encoded_machine_id_len(_id: &MachineId) -> usize {
+    crate::string_field_len(MACHINE_ID_LENGTH)
 }
 
 mod legacy_rpc {
@@ -325,7 +325,7 @@ impl sqlx::Encode<'_, sqlx::Postgres> for MachineId {
         &self,
         buf: &mut <Postgres as Database>::ArgumentBuffer,
     ) -> Result<IsNull, BoxDynError> {
-        buf.extend(self.to_string().as_bytes());
+        std::io::Write::write_fmt(&mut **buf, format_args!("{self}"))?;
         Ok(sqlx::encode::IsNull::No)
     }
 }
@@ -782,7 +782,7 @@ impl Serialize for MachineId {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        serializer.collect_str(self)
     }
 }
 
@@ -791,11 +791,7 @@ impl<'de> Deserialize<'de> for MachineId {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
-
-        let str_value = String::deserialize(deserializer)?;
-        let id = MachineId::from_str(&str_value).map_err(|err| Error::custom(err.to_string()))?;
-        Ok(id)
+        crate::deserialize_from_str(deserializer)
     }
 }
 

@@ -225,17 +225,15 @@ impl HealthReport {
         if let Some(previous) = previous {
             for prev_alert in previous.alerts.iter() {
                 if let Some(timestamp) = prev_alert.in_alert_since {
-                    previous_in_alert_times.insert(
-                        (prev_alert.id.clone(), prev_alert.target.clone()),
-                        timestamp,
-                    );
+                    previous_in_alert_times
+                        .insert((&prev_alert.id, prev_alert.target.as_deref()), timestamp);
                 }
             }
         }
 
         for alert in self.alerts.iter_mut() {
             alert.in_alert_since = Some(
-                match previous_in_alert_times.get(&(alert.id.clone(), alert.target.clone())) {
+                match previous_in_alert_times.get(&(&alert.id, alert.target.as_deref())) {
                     Some(time) => *time,
                     None => chrono::Utc::now(),
                 },

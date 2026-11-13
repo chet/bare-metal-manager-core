@@ -74,9 +74,9 @@ pub enum ExpectedSwitchUpdateField {
     BmcRetainCredentials,
 }
 
-impl Display for ExpectedSwitchUpdateField {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
+impl ExpectedSwitchUpdateField {
+    fn as_str(&self) -> &'static str {
+        match self {
             Self::BmcUsername => "bmc_username",
             Self::BmcPassword => "bmc_password",
             Self::SwitchSerialNumber => "switch_serial_number",
@@ -90,7 +90,13 @@ impl Display for ExpectedSwitchUpdateField {
             Self::BmcIpAddress => "bmc_ip_address",
             Self::NvosIpAddress => "nvos_ip_address",
             Self::BmcRetainCredentials => "bmc_retain_credentials",
-        })
+        }
+    }
+}
+
+impl Display for ExpectedSwitchUpdateField {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }
 
@@ -219,7 +225,7 @@ impl CarbideApiClient {
     ) -> Result<(), Status> {
         let update_mask = update_mask
             .iter()
-            .map(ToString::to_string)
+            .map(ExpectedSwitchUpdateField::as_str)
             .collect::<Vec<_>>()
             .join(",")
             .parse()

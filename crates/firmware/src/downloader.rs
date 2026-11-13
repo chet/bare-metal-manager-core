@@ -1064,11 +1064,13 @@ async fn download_and_publish(
     // No await after verification: a cancelled owner cannot leave behind a
     // blocking worker that publishes the file after a new attempt starts.
     std::fs::rename(&staged.path, &staged.attempt.filename)
-        .wrap_err(format!(
-            "unable to rename {} to {}",
-            staged.path.display(),
-            staged.attempt.filename.display()
-        ))
+        .wrap_err_with(|| {
+            format!(
+                "unable to rename {} to {}",
+                staged.path.display(),
+                staged.attempt.filename.display()
+            )
+        })
         .map_err(fail(DownloadOutcome::Io))?;
     staged.published = true;
     Ok(())
@@ -1155,10 +1157,12 @@ async fn download(
         .get(url)
         .send()
         .await
-        .wrap_err(format!(
-            "FirmwareDownloader got error trying to download {}",
-            loggable_url(url)
-        ))
+        .wrap_err_with(|| {
+            format!(
+                "FirmwareDownloader got error trying to download {}",
+                loggable_url(url)
+            )
+        })
         .map_err(fail(DownloadOutcome::Fetch))?;
     if !res.status().is_success() {
         return Err(fail(DownloadOutcome::Status)(eyre!(

@@ -120,7 +120,7 @@ impl ExpectedSwitch {
     /// The MAC addresses of every NVOS port, primary first.
     pub fn nvos_mac_addresses(&self) -> Vec<MacAddress> {
         let mut interfaces: Vec<&ExpectedNvosInterface> = self.nvos_interfaces.iter().collect();
-        interfaces.sort_by_key(|i| (!i.is_primary, i.mac_address.to_string()));
+        interfaces.sort_by_key(|i| (!i.is_primary, i.mac_address));
         interfaces.into_iter().map(|i| i.mac_address).collect()
     }
 

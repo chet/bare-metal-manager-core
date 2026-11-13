@@ -195,14 +195,19 @@ impl Display for SkuComponentStorage {
         write!(f, "model: {} count {}", self.model, self.count)?;
         match (self.min_size_mb, self.max_size_mb) {
             (None, None) => {}
-            (min, max) => write!(
-                f,
-                " size {}-{} MB",
-                min.map(|v| v.to_string())
-                    .unwrap_or_else(|| "*".to_string()),
-                max.map(|v| v.to_string())
-                    .unwrap_or_else(|| "*".to_string()),
-            )?,
+            (min, max) => {
+                f.write_str(" size ")?;
+                match min {
+                    Some(min) => write!(f, "{min}")?,
+                    None => f.write_str("*")?,
+                }
+                f.write_str("-")?;
+                match max {
+                    Some(max) => write!(f, "{max}")?,
+                    None => f.write_str("*")?,
+                }
+                f.write_str(" MB")?;
+            }
         }
         if !self.pci_patterns.is_empty() {
             write!(f, " pci {:?}", self.pci_patterns)?;
@@ -481,13 +486,10 @@ struct DiscoveredDrive<'a> {
 
 impl DiscoveredDrive<'_> {
     fn describe(&self) -> String {
-        format!(
-            "path {}, size {}",
-            self.path.unwrap_or("<unknown>"),
-            self.size_mb
-                .map(|v| format!("{v} MB"))
-                .unwrap_or_else(|| "<unknown>".to_string()),
-        )
+        match self.size_mb {
+            Some(size) => format!("path {}, size {size} MB", self.path.unwrap_or("<unknown>")),
+            None => format!("path {}, size <unknown>", self.path.unwrap_or("<unknown>")),
+        }
     }
 
     fn size_in_range(&self, min: Option<u32>, max: Option<u32>) -> bool {
@@ -705,9 +707,21 @@ fn diff_storage_by_location(actual_sku: &Sku, expected_sku: &Sku, diffs: &mut Ve
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::{Check, check_values, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn storage_display_preserves_optional_size_bounds() {
+        value_scenarios!(run = |(min_size_mb, max_size_mb)| SkuComponentStorage {
+            model: "nvme".to_string(), count: 2, min_size_mb, max_size_mb, pci_patterns: Vec::new(),
+        }.to_string();
+            "unbounded" { (None, None) => "model: nvme count 2".to_string(), }
+            "lower bound" { (Some(0), None) => "model: nvme count 2 size 0-* MB".to_string(), }
+            "upper bound" { (None, Some(100)) => "model: nvme count 2 size *-100 MB".to_string(), }
+            "both bounds" { (Some(1), Some(100)) => "model: nvme count 2 size 1-100 MB".to_string(), }
+        );
+    }
 
     fn sku(schema_version: u32, storage: Vec<SkuComponentStorage>) -> Sku {
         Sku {

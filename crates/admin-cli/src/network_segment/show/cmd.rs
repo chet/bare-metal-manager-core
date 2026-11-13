@@ -83,7 +83,7 @@ pub(in crate::network_segment) async fn convert_network_to_nice_format(
             segment
                 .deleted
                 .map(|x| x.to_string())
-                .unwrap_or("Not Deleted".to_string()),
+                .unwrap_or_else(|| "Not Deleted".to_string()),
         ),
         ("STATE", state),
         ("VPC", config.vpc_id.unwrap_or_default().to_string()),
@@ -169,12 +169,15 @@ pub(in crate::network_segment) async fn convert_network_to_nice_format(
                 "\t---------------------------------------------------"
             )?;
             for x in history.iter().rev().take(5).rev() {
+                let state = serde_json::from_str::<NetworkState>(&x.state);
+                let state = state
+                    .as_ref()
+                    .map(|state| state.state.as_str())
+                    .unwrap_or(&x.state);
                 writeln!(
                     &mut lines,
                     "\t{:<15} {:25} {}",
-                    serde_json::from_str::<NetworkState>(&x.state)
-                        .map(|ns| ns.state)
-                        .unwrap_or_else(|_| x.state.clone()),
+                    state,
                     x.version,
                     x.time.unwrap_or_default()
                 )?;
@@ -248,8 +251,8 @@ fn convert_network_to_nice_table(
             config
                 .prefixes
                 .iter()
-                .map(|x| x.prefix.to_string())
-                .collect::<Vec<String>>()
+                .map(|x| x.prefix.as_str())
+                .collect::<Vec<_>>()
                 .join(", "),
             end_ip,
             version,

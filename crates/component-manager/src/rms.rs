@@ -3490,7 +3490,7 @@ fn summarize_firmware_batch(
     let success = batch.status == rms::ReturnCode::Success as i32
         && stats.failed_nodes == 0
         && node_failure.is_none();
-    let job_id = node_job_id.or_else(|| (!batch.job_id.is_empty()).then_some(batch.job_id.clone()));
+    let job_id = node_job_id.or_else(|| (!batch.job_id.is_empty()).then(|| batch.job_id.clone()));
 
     if success {
         return (true, None, job_id);

@@ -294,7 +294,7 @@ pub async fn run_metrics_endpoint_with_cancellation(
     let listener = bind_tcp_listener(config.address).await?;
 
     tracing::info!(
-        metrics_address = config.address.to_string(),
+        metrics_address = %config.address,
         "Starting metrics listener"
     );
 

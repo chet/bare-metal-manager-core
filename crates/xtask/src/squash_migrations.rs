@@ -229,18 +229,27 @@ fn archive_path(migrations_dir: &Path, timestamp: &str) -> Result<PathBuf> {
 }
 
 fn sanitize_dump(dump: &str) -> String {
-    dump.lines()
+    let mut output = String::new();
+    for (index, line) in dump
+        .lines()
         .filter(|line| {
             !line.starts_with('\\')
                 && !line.starts_with("SET search_path =")
                 && !line.contains("pg_catalog.set_config('search_path', '', false)")
         })
-        .map(|line| {
-            line.strip_prefix("SET ")
-                .map_or_else(|| line.to_owned(), |setting| format!("SET LOCAL {setting}"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .enumerate()
+    {
+        if index != 0 {
+            output.push('\n');
+        }
+        if let Some(setting) = line.strip_prefix("SET ") {
+            output.push_str("SET LOCAL ");
+            output.push_str(setting);
+        } else {
+            output.push_str(line);
+        }
+    }
+    output
 }
 
 fn validate_snapshot(content: &str) -> Result<()> {

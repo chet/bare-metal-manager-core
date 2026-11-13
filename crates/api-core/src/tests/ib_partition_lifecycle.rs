@@ -755,7 +755,7 @@ async fn test_duplicate_ib_partition(pool: sqlx::PgPool) {
     .unwrap()
     .remove(0);
     let status = partition.status.as_mut().unwrap();
-    status.pkey = Some(pkey.to_string().parse().unwrap());
+    status.pkey = Some(pkey.parse().unwrap());
 
     let mut txn = pool.begin().await.unwrap();
     db::ib_partition::update_status(partition.id, &partition.status, &mut txn)

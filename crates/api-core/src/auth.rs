@@ -463,7 +463,7 @@ mod tests {
             let certificate = certs.first().unwrap();
             assert_eq!(
                 Principal::try_from_client_certificate(certificate, &context)
-                    .wrap_err(format!("Bad certificate {}", test.cert))?,
+                    .wrap_err_with(|| format!("Bad certificate {}", test.cert))?,
                 test.desired
             );
         }
