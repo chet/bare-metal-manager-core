@@ -137,10 +137,7 @@ fn extract_metadata(category: String, state: &FmdsState) -> (StatusCode, String)
                 "instance name not available".to_string(),
             ),
         },
-        SITENAME_CATEGORY => (
-            StatusCode::OK,
-            config.sitename.clone().unwrap_or(String::new()),
-        ),
+        SITENAME_CATEGORY => (StatusCode::OK, config.sitename.clone().unwrap_or_default()),
         USER_DATA_CATEGORY => (StatusCode::OK, config.user_data.clone()),
         ASN_CATEGORY => (StatusCode::OK, config.asn.to_string()),
         _ => (
@@ -307,10 +304,12 @@ async fn get_instance_attributes(
 
         let mut response = String::new();
         if inst.ib_guid.is_some() {
-            response += &(GUID.to_owned() + "\n");
+            response.push_str(GUID);
+            response.push('\n');
         }
         if inst.ib_partition_id.is_some() {
-            response += &(IB_PARTITION.to_owned() + "\n");
+            response.push_str(IB_PARTITION);
+            response.push('\n');
         }
         response.push_str(LID);
 

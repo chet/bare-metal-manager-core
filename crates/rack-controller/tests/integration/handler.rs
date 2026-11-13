@@ -1155,7 +1155,7 @@ async fn test_component_health_waits_for_successful_handler(
         );
         let history_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM rack_health_history WHERE object_id = $1")
-                .bind(rack_id.to_string())
+                .bind(rack_id.as_str())
                 .fetch_one(&pool)
                 .await?;
         assert_eq!(history_count, iteration as i64);

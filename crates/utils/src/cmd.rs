@@ -42,26 +42,26 @@ impl CmdError {
         output: &std::process::Output,
     ) -> Self {
         let error_details = if output.stderr.is_empty() {
-            String::from_utf8_lossy(&output.stdout).to_string()
+            String::from_utf8_lossy(&output.stdout).into_owned()
         } else {
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&output.stderr).into_owned()
         };
 
         Self::Subprocess(
-            command.get_program().to_string_lossy().to_string(),
+            command.get_program().to_string_lossy().into_owned(),
             command
                 .get_args()
-                .map(|arg| arg.to_string_lossy().to_string())
+                .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<String>>(),
             error_details,
         )
     }
     pub fn output_parse_error(command: &Command) -> Self {
         Self::OutputParse(
-            command.get_program().to_string_lossy().to_string(),
+            command.get_program().to_string_lossy().into_owned(),
             command
                 .get_args()
-                .map(|arg| arg.to_string_lossy().to_string())
+                .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<String>>(),
         )
     }
@@ -102,7 +102,8 @@ impl Cmd {
         self
     }
 
-    pub fn env<S>(mut self, key: S, value: S) -> Self
+    /// Sets a child environment variable using borrowed or owned OS strings.
+    pub fn env<S>(mut self, key: S, value: impl AsRef<OsStr>) -> Self
     where
         S: AsRef<OsStr>,
     {
@@ -150,15 +151,14 @@ impl Cmd {
     }
 
     fn pretty_cmd(&self) -> String {
-        format!(
-            "{} {}",
-            self.command.get_program().to_string_lossy(),
-            self.command
-                .get_args()
-                .map(|x| x.to_string_lossy())
-                .collect::<Vec<std::borrow::Cow<'_, str>>>()
-                .join(" ")
-        )
+        let mut output = format!("{} ", self.command.get_program().to_string_lossy());
+        for (index, argument) in self.command.get_args().enumerate() {
+            if index != 0 {
+                output.push(' ');
+            }
+            output.push_str(&argument.to_string_lossy());
+        }
+        output
     }
 }
 
@@ -188,7 +188,8 @@ impl TokioCmd {
         self
     }
 
-    pub fn env<S>(mut self, key: S, value: S) -> Self
+    /// Sets a child environment variable using borrowed or owned OS strings.
+    pub fn env<S>(mut self, key: S, value: impl AsRef<OsStr>) -> Self
     where
         S: AsRef<OsStr>,
     {
@@ -286,13 +287,53 @@ impl TokioCmd {
 
     fn pretty_cmd(&self) -> String {
         let c = self.command.as_std();
-        format!(
-            "{} {}",
-            c.get_program().to_string_lossy(),
-            c.get_args()
-                .map(|x| x.to_string_lossy())
-                .collect::<Vec<std::borrow::Cow<'_, str>>>()
-                .join(" ")
-        )
+        let mut output = format!("{} ", c.get_program().to_string_lossy());
+        for (index, argument) in c.get_args().enumerate() {
+            if index != 0 {
+                output.push(' ');
+            }
+            output.push_str(&argument.to_string_lossy());
+        }
+        output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn pretty_commands_preserve_empty_and_multiple_arguments() {
+        value_scenarios!(run = |arguments: &[&str]| {
+            let borrowed_value = String::from("borrowed");
+            let command = Cmd::new("program")
+                .args(arguments)
+                .env::<&str>("GENERIC", "generic")
+                .env("BORROWED", &borrowed_value);
+            let tokio_command = TokioCmd::new("program")
+                .args(arguments)
+                .env::<&str>("GENERIC", "generic")
+                .env("BORROWED", &borrowed_value);
+            for configured in [&command.command, tokio_command.command.as_std()] {
+                assert_eq!(
+                    configured.get_envs().collect::<std::collections::HashMap<_, _>>(),
+                    std::collections::HashMap::from([
+                        (OsStr::new("GENERIC"), Some(OsStr::new("generic"))),
+                        (OsStr::new("BORROWED"), Some(OsStr::new("borrowed"))),
+                    ])
+                );
+            }
+            (command.pretty_cmd(), tokio_command.pretty_cmd())
+        };
+            "no arguments retains the trailing space" {
+                &[][..] => ("program ".to_string(), "program ".to_string()),
+            }
+            "multiple arguments are separated by spaces" {
+                &["first", "two words"][..]
+                    => ("program first two words".to_string(), "program first two words".to_string()),
+            }
+        );
     }
 }

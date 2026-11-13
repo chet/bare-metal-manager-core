@@ -258,7 +258,7 @@ impl BaselineTestEnvironment {
                 match assertion {
                     BaselineTestAssertion::ConnectAsMachineId => {
                         let connection_config = ConnectionConfig {
-                            connection_name: &format!("{connection_name} to host").to_string(),
+                            connection_name: &format!("{connection_name} to host"),
                             user: &mock_host.machine_id.to_string(),
                             private_key_path: &ADMIN_SSH_KEY_PATH,
                             addr,
@@ -291,7 +291,7 @@ impl BaselineTestEnvironment {
                         // Make sure it *doesn't* work as the tenant user.
                         let result_as_tenant =
                             ssh_client::assert_connection_works(&ConnectionConfig {
-                                connection_name: &format!("{connection_name} to host").to_string(),
+                                connection_name: &format!("{connection_name} to host"),
                                 user: &mock_host.machine_id.to_string(),
                                 private_key_path: &TENANT_SSH_KEY_PATH,
                                 addr,
@@ -311,7 +311,7 @@ impl BaselineTestEnvironment {
                             continue;
                         }
                         let connection_config = ConnectionConfig {
-                            connection_name: &format!("{connection_name} to instance").to_string(),
+                            connection_name: &format!("{connection_name} to instance"),
                             user: &mock_host.instance_id.to_string(),
                             private_key_path: &TENANT_SSH_KEY_PATH,
                             addr,
@@ -341,7 +341,7 @@ impl BaselineTestEnvironment {
                     }
                     BaselineTestAssertion::FillLogsAsMachineId(bytes) => {
                         let connection_config = ConnectionConfig {
-                            connection_name: &format!("{connection_name} to host").to_string(),
+                            connection_name: &format!("{connection_name} to host"),
                             user: &mock_host.machine_id.to_string(),
                             private_key_path: &ADMIN_SSH_KEY_PATH,
                             addr,

@@ -34,8 +34,7 @@ pub(super) async fn normalize_request<B>(mut request: Request<B>) -> Request<B> 
 
     let uri = request.uri_mut();
     if let Some(p_q) = uri.path_and_query() {
-        let path_and_query = p_q.to_string();
-        let removed_duplicated_slashes = path_and_query.as_str().replace("//", "/");
+        let removed_duplicated_slashes = p_q.as_str().replace("//", "/");
         let new_path_and_query = match PathAndQuery::from_str(removed_duplicated_slashes.as_str()) {
             Ok(path_and_query) => path_and_query,
             _ => unreachable!(),

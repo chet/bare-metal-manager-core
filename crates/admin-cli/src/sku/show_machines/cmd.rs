@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::fmt::Write;
+
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge::SkuList;
 use prettytable::{Row, Table};
@@ -40,12 +42,13 @@ async fn show_machine_table(
     table.set_titles(Row::from(vec!["SKU ID", "Assigned Machine IDs"]));
 
     for sku in skus {
-        let machines = sku
-            .associated_machine_ids
-            .into_iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<String>>()
-            .join("\n");
+        let mut machines = String::new();
+        for (index, id) in sku.associated_machine_ids.iter().enumerate() {
+            if index != 0 {
+                machines.push('\n');
+            }
+            write!(machines, "{id}")?;
+        }
         table.add_row(Row::from(vec![sku.id, machines]));
     }
     table.print(&mut output)?;

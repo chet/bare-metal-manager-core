@@ -466,7 +466,7 @@ where
     S: Serializer,
 {
     if let Some(val) = val.load().deref().deref() {
-        s.serialize_str(val.to_string().as_str())
+        s.collect_str(val)
     } else {
         s.serialize_none()
     }

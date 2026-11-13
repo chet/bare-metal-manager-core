@@ -193,6 +193,23 @@ fn test_device_filter_set_summary_with_filters() {
     assert!(summary_vec.iter().any(|s| s.contains("part_number")));
 }
 
+#[test]
+fn filter_display_preserves_values_and_filter_order() {
+    value_scenarios!(
+        run = |filters| DeviceFilterSet { filters }.to_string();
+        "single filter with no values" {
+            vec![DeviceFilter::device_type(vec![], MatchMode::Exact)]
+                => "device_type::exact".to_string(),
+        }
+        "multiple filters preserve empty items and Unicode" {
+            vec![
+                DeviceFilter::device_type(vec!["z".to_string(), "".to_string(), "α".to_string()], MatchMode::Prefix),
+                DeviceFilter::part_number(vec!["MCX".to_string()], MatchMode::Regex),
+            ] => "device_type:z,,α:prefix, part_number:MCX:regex".to_string(),
+        }
+    );
+}
+
 // DeviceFilter::from_str parses "field:values[:match_mode]". The field and the
 // (comma-split) values are required; an omitted match mode defaults to Regex.
 // Each row pins the full parsed triple (field, values, match_mode).

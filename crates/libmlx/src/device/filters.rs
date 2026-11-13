@@ -99,8 +99,9 @@ impl FromStr for DeviceFilter {
         // Parse comma-separated values for OR logic.
         let values: Vec<String> = parts[1]
             .split(',')
-            .map(|v| v.trim().to_string())
+            .map(str::trim)
             .filter(|v| !v.is_empty())
+            .map(str::to_owned)
             .collect();
 
         if values.is_empty() {
@@ -127,10 +128,9 @@ impl FromStr for DeviceFilter {
 impl Display for DeviceFilter {
     // fmt formats the filter as field:value1,value2:match_mode.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let field_name = self.field.to_string();
-        let values_str = self.values.join(",");
-        let mode_name = self.match_mode.to_string();
-        write!(f, "{field_name}:{values_str}:{mode_name}")
+        write!(f, "{}:", self.field)?;
+        crate::write_joined(f, &self.values, ",")?;
+        write!(f, ":{}", self.match_mode)
     }
 }
 
@@ -139,12 +139,7 @@ impl Display for DeviceFilterSet {
         if self.filters.is_empty() {
             write!(f, "No filters")
         } else {
-            let filter_strings: Vec<String> = self
-                .filters
-                .iter()
-                .map(|filter| filter.to_string())
-                .collect();
-            write!(f, "{}", filter_strings.join(", "))
+            crate::write_joined(f, &self.filters, ", ")
         }
     }
 }

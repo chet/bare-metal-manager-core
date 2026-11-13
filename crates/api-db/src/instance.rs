@@ -707,7 +707,7 @@ pub async fn find_by_extension_service(
 
     if let Some(version) = version {
         builder.push(" AND cfg->>'version' = ");
-        builder.push_bind(version.to_string());
+        builder.push_bind(version);
     }
     builder.push(")");
 
@@ -1680,7 +1680,7 @@ pub async fn batch_persist<'a>(
             separated.push("(");
             separated.push_bind_unseparated(value.instance_id);
             separated.push_unseparated(",");
-            separated.push_bind_unseparated(value.machine_id.to_string());
+            separated.push_bind_unseparated(value.machine_id);
             separated.push_unseparated(",");
             separated.push_bind_unseparated(operating_system_id);
             separated.push_unseparated(",");

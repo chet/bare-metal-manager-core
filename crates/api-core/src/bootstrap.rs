@@ -80,7 +80,7 @@ pub fn start_runtime_prelude(
     tracing::info!(
         worker_count = tokio::runtime::Handle::current().metrics().num_workers(),
         cpu_count = num_cpus::get(),
-        tokio_worker_threads = %std::env::var("TOKIO_WORKER_THREADS").unwrap_or_else(|_| "UNSET".to_string()),
+        tokio_worker_threads = %std::env::var("TOKIO_WORKER_THREADS").as_deref().unwrap_or("UNSET"),
         "Tokio worker thread configuration",
     );
 
@@ -99,7 +99,7 @@ pub fn start_runtime_prelude(
     );
 
     tracing::info!(
-        listen_address = carbide_config.listen.to_string(),
+        listen_address = %carbide_config.listen,
         build_version = carbide_version::v!(build_version),
         build_date = carbide_version::v!(build_date),
         rust_version = carbide_version::v!(rust_version),

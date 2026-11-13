@@ -266,6 +266,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
             })
             .chain(value.dpus.iter().enumerate().map(|(index, dpu)| {
                 let slot = index + 5; // DPUs start with 5.
+                let [a, b, c, d, e, f] = dpu.host_mac_address.bytes();
                 EthernetInterface {
                     id: Some(format!("NIC.Slot.{slot}-1")),
                     description: Some(format!("NIC in Slot {slot} Port 1")),
@@ -275,9 +276,8 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                     uefi_device_path: Some(
                         dpu.override_hosts_uefi_device_path.clone().unwrap_or(
                             UefiDevicePath::from_str(&format!(
-                                "PciRoot(0x8)/Pci(0x2,0xa)/Pci(0x0,0x{:x})/MAC({},0x1)",
+                                "PciRoot(0x8)/Pci(0x2,0xa)/Pci(0x0,0x{:x})/MAC({a:02X}{b:02X}{c:02X}{d:02X}{e:02X}{f:02X},0x1)",
                                 index + 1,
-                                dpu.host_mac_address.to_string().replace(':', ""),
                             ))
                             .unwrap(),
                         ),

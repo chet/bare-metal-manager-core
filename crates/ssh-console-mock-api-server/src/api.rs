@@ -90,11 +90,10 @@ impl Forge for MockApiServer {
             .instance_ids
             .iter()
             .filter_map(|instance_id| {
+                let requested_id = instance_id.value.to_lowercase();
                 self.mock_hosts
                     .iter()
-                    .find(|h| {
-                        h.instance_id.to_string().to_lowercase() == instance_id.value.to_lowercase()
-                    })
+                    .find(|h| h.instance_id.to_string() == requested_id)
                     .and_then(|h| {
                         carbide_uuid::machine::StableHostMachineId::try_from(h.machine_id)
                             .ok()

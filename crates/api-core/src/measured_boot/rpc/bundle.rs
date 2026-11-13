@@ -323,9 +323,9 @@ pub(crate) async fn handle_find_closest_match(
 
     let bundle = match bundle::find_closest_match(
         &mut txn,
-        journal.profile_id.ok_or(CarbideError::InvalidArgument(
-            "A journal without profile detected".into(),
-        ))?,
+        journal.profile_id.ok_or_else(|| {
+            CarbideError::InvalidArgument("A journal without profile detected".into())
+        })?,
         &report.pcr_values(),
     )
     .await?

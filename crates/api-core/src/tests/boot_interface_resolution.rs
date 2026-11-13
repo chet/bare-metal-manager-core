@@ -107,7 +107,7 @@ async fn clear_controller_queue(
     machine_id: &HostMachineId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(machine_id.to_string())
+        .bind(machine_id)
         .execute(pool)
         .await?;
     Ok(())
@@ -121,7 +121,7 @@ async fn controller_queue_count(
     sqlx::query_scalar(
         "SELECT count(*) FROM machine_state_controller_queued_objects WHERE object_id = $1",
     )
-    .bind(machine_id.to_string())
+    .bind(machine_id)
     .fetch_one(pool)
     .await
 }

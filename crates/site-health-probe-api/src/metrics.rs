@@ -303,11 +303,16 @@ pub fn promql_quoted(value: &str) -> String {
 /// The selector as PromQL equality matchers, `job="a",namespace="b"`, in
 /// label order.
 pub fn selector_matchers(selector: &BTreeMap<String, String>) -> String {
-    selector
-        .iter()
-        .map(|(name, value)| format!("{name}={}", promql_quoted(value)))
-        .collect::<Vec<_>>()
-        .join(",")
+    let mut matchers = String::new();
+    for (index, (name, value)) in selector.iter().enumerate() {
+        if index != 0 {
+            matchers.push(',');
+        }
+        matchers.push_str(name);
+        matchers.push('=');
+        matchers.push_str(&promql_quoted(value));
+    }
+    matchers
 }
 
 /// The wire name of an API enum, which is also its label value.

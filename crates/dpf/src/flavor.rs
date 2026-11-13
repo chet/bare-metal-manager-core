@@ -3539,17 +3539,18 @@ done
 
     /// Executes the flavor-provided OVN address script with synthetic `ip` output.
     fn run_ovn_encap_script(addresses: &[&str]) -> Output {
-        let ip_output = addresses
-            .iter()
-            .enumerate()
-            .map(|(index, address)| {
-                format!(
-                    "{}: oob_net0 inet {address}/24 brd 10.0.0.255 scope global oob_net0",
-                    index + 1
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\\n");
+        let mut ip_output = String::new();
+        for (index, address) in addresses.iter().enumerate() {
+            if index != 0 {
+                ip_output.push_str("\\n");
+            }
+            write!(
+                ip_output,
+                "{}: oob_net0 inet {address}/24 brd 10.0.0.255 scope global oob_net0",
+                index + 1
+            )
+            .expect("writing to a String cannot fail");
+        }
         let raw = ovn_encap_config_files()[0]
             .raw
             .clone()
@@ -3770,8 +3771,8 @@ done
             )
             .unwrap(),
         );
-        assert!(bf3.contains(&"NUM_OF_VFS=3".to_string()));
-        assert!(bf3.contains(&"PF_TOTAL_SF=61".to_string()));
+        assert!(bf3.iter().any(|value| value == "NUM_OF_VFS=3"));
+        assert!(bf3.iter().any(|value| value == "PF_TOTAL_SF=61"));
         let generic_bf4 = parameters(
             flavor_bf4_with_topology(
                 "ns",
@@ -3786,8 +3787,8 @@ done
             )
             .unwrap(),
         );
-        assert!(generic_bf4.contains(&"NUM_OF_VFS=5".to_string()));
-        assert!(generic_bf4.contains(&"PF_TOTAL_SF=63".to_string()));
+        assert!(generic_bf4.iter().any(|value| value == "NUM_OF_VFS=5"));
+        assert!(generic_bf4.iter().any(|value| value == "PF_TOTAL_SF=63"));
 
         // Topology-free Astra retains 46 hardware VFs and uses 28 static service endpoints, eight
         // DOCA Weave DHCP Agent SFs, and four SFs of fixed headroom.
@@ -3795,8 +3796,8 @@ done
             metadata: ObjectMeta::default(),
             spec: astra_flavor_spec(&None, true),
         });
-        assert!(astra.contains(&"NUM_OF_VFS=46".to_string()));
-        assert!(astra.contains(&"PF_TOTAL_SF=40".to_string()));
+        assert!(astra.iter().any(|value| value == "NUM_OF_VFS=46"));
+        assert!(astra.iter().any(|value| value == "PF_TOTAL_SF=40"));
     }
 
     #[test]
@@ -3931,8 +3932,16 @@ done
                 "PCI_BUS16_WIDTH=3",
             ]
         );
-        assert!(!gb200.contains(&"PCI_SWITCH0_UPSTREAM_PORT_BUS=0".to_string()));
-        assert!(!gb200.contains(&"PCI_SWITCH0_UPSTREAM_PORT_PEX=0".to_string()));
+        assert!(
+            !gb200
+                .iter()
+                .any(|value| value == "PCI_SWITCH0_UPSTREAM_PORT_BUS=0")
+        );
+        assert!(
+            !gb200
+                .iter()
+                .any(|value| value == "PCI_SWITCH0_UPSTREAM_PORT_PEX=0")
+        );
     }
 
     /// Builds a flavor from operator-supplied bf.cfg parameters and returns the field they land in.
@@ -5037,7 +5046,7 @@ done
             .unwrap();
         let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
         value_scenarios!(
-            run = |path| paths.contains(&path.to_string());
+            run = |path| paths.iter().any(|value| value == path);
             "acltool.conf" {
                 "/var/lib/hbn/etc/supervisor/conf.d/acltool.conf" => true,
             }

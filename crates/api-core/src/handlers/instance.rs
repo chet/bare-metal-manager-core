@@ -1090,7 +1090,7 @@ pub(crate) async fn invoke_power(
     // both locks so an earlier snapshot cannot bypass admitted firmware work.
     let locked_instance = db::instance::find_by_id_for_update(txn.as_mut(), instance_id)
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
         })?;
@@ -1102,7 +1102,7 @@ pub(crate) async fn invoke_power(
     )
     .await?
     .pop()
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "instance",
         id: instance_id.to_string(),
     })?;
@@ -1319,7 +1319,7 @@ pub(crate) async fn update_operating_system(
 
     let instance = db::instance::find_by_id(&mut txn, instance_id)
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
         })?;
@@ -1347,7 +1347,7 @@ pub(crate) async fn update_operating_system(
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "instance",
         id: instance_id.to_string(),
     })?;
@@ -1436,7 +1436,7 @@ pub(crate) async fn update_instance_config(
         // implicit optimistic token rather than silently rebasing.
         let request_start_instance = db::instance::find_by_id(&mut txn, instance_id)
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "instance",
                 id: instance_id.to_string(),
             })?;
@@ -1452,7 +1452,7 @@ pub(crate) async fn update_instance_config(
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: machine_id.to_string(),
     })?;
@@ -1479,7 +1479,7 @@ pub(crate) async fn update_instance_config(
         .instance
         .as_ref()
         .filter(|instance| instance.id == instance_id)
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
         })?;
@@ -1561,7 +1561,7 @@ pub(crate) async fn update_instance_config(
             LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
         )
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
         })?;
@@ -1570,7 +1570,7 @@ pub(crate) async fn update_instance_config(
         .instance
         .as_ref()
         .filter(|instance| instance.id == instance_id)
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
         })?;
@@ -1617,8 +1617,7 @@ pub(crate) async fn update_instance_config(
         {
             return Err(CarbideError::FailedPrecondition(format!(
                 "NetworkSecurityGroup `{}` does not exist or is not owned by tenant `{}`",
-                nsg_id,
-                tenant_org.clone(),
+                nsg_id, tenant_org,
             ))
             .into());
         }
@@ -1811,7 +1810,7 @@ pub(crate) async fn update_instance_config(
     if ib_config_update_requested {
         let locked_instance = db::instance::find_by_id_for_update(txn.as_mut(), instance_id)
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "instance",
                 id: instance_id.to_string(),
             })?;
@@ -1848,7 +1847,7 @@ pub(crate) async fn update_instance_config(
             LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
         )
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: machine_id.to_string(),
         })?;
@@ -1861,7 +1860,7 @@ pub(crate) async fn update_instance_config(
         .instance
         .as_ref()
         .filter(|instance| instance.id == instance_id)
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance_id.to_string(),
         })?;
@@ -1925,7 +1924,7 @@ pub(crate) async fn update_instance_config(
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "instance",
         id: instance_id.to_string(),
     })?;
@@ -2120,13 +2119,13 @@ async fn validate_service_vpc_tenant_overlap(
     db::instance_address::lock_table_for_allocation(txn.as_mut()).await?;
     let locked = db::instance::find_by_id_for_update(txn.as_mut(), instance.id)
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance.id.to_string(),
         })?;
     let locked_snapshot = db::instance::find_by_id(txn.as_mut(), instance.id)
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "instance",
             id: instance.id.to_string(),
         })?;
@@ -2647,7 +2646,7 @@ pub(super) async fn force_delete_instance(
         },
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: instance.machine_id.to_string(),
     })?;
@@ -2657,7 +2656,7 @@ pub(super) async fn force_delete_instance(
         LoadSnapshotOptions::default(),
     )
     .await?
-    .ok_or(CarbideError::NotFoundError {
+    .ok_or_else(|| CarbideError::NotFoundError {
         kind: "machine",
         id: instance.machine_id.to_string(),
     })?;

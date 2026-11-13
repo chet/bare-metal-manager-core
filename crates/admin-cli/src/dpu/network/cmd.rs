@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
+use std::fmt::Write;
 
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge::{AddressFamily, FlatInterfaceConfig, ManagedHostNetworkConfigResponse};
@@ -176,15 +177,16 @@ async fn show_dpu_network_config(
                     "VPC Peer Prefixes",
                     tintf.vpc_peer_prefixes.join(", ")
                 ]);
-                table.add_row(row![
-                    "VPC Peer VNIs",
-                    tintf
-                        .vpc_peer_vnis
-                        .iter()
-                        .map(|vni| vni.to_string())
-                        .collect::<Vec<String>>()
-                        .join(", ")
-                ]);
+                table.add_row(row!["VPC Peer VNIs", {
+                    let mut vnis = String::new();
+                    for (index, vni) in tintf.vpc_peer_vnis.iter().enumerate() {
+                        if index != 0 {
+                            vnis.push_str(", ");
+                        }
+                        write!(vnis, "{vni}")?;
+                    }
+                    vnis
+                }]);
                 table.add_row(row!["VPC VNI", tintf.vpc_vni]);
                 table.add_row(row!["SVI IP", tintf.svi_ip()]);
                 table.add_row(row!["Tenant VRF Loopback", tintf.tenant_vrf_loopback_ip()]);
@@ -309,9 +311,12 @@ pub(crate) async fn show_dpu_status(
                         probe_alerts.push('\n');
                     }
                     if let Some(target) = &alert.target {
-                        probe_alerts += &format!("{} [Target: {}]", alert.id, target)
+                        probe_alerts.push_str(alert.id.as_str());
+                        probe_alerts.push_str(" [Target: ");
+                        probe_alerts.push_str(target);
+                        probe_alerts.push(']');
                     } else {
-                        probe_alerts += &alert.id.to_string();
+                        probe_alerts += alert.id.as_str();
                     }
                 }
             }
@@ -322,10 +327,14 @@ pub(crate) async fn show_dpu_status(
                     .unwrap_or_default(),
                 st.network_config_version.unwrap_or_default(),
                 health
-                    .map(|health| health.alerts.is_empty().to_string())
-                    .unwrap_or_else(|| "unknown".to_string()),
+                    .map(|health| if health.alerts.is_empty() {
+                        "true"
+                    } else {
+                        "false"
+                    })
+                    .unwrap_or("unknown"),
                 probe_alerts,
-                st.dpu_agent_version.unwrap_or("".to_string())
+                st.dpu_agent_version.unwrap_or_default()
             ]);
         }
         async_write!(output_file, "{}", table)?;

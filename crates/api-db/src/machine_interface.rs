@@ -449,34 +449,29 @@ pub async fn associate_bmc_interface(
     association: MachineInterfaceAssociation,
     txn: &mut PgConnection,
 ) -> DatabaseResult<MachineInterfaceId> {
-    let (query, association_type, id_value) = match association {
-        MachineInterfaceAssociation::Machine(id) => (
-            "UPDATE machine_interfaces SET machine_id=$1, association_type=$2::association_type, \
+    let (query, statement) = match association {
+        MachineInterfaceAssociation::Machine(id) => {
+            let query = "UPDATE machine_interfaces SET machine_id=$1, association_type=$2::association_type, \
              interface_type='Bmc'::interface_type, primary_interface=false \
-             WHERE id=$3::uuid RETURNING id",
-            "Machine",
-            id.to_string(),
-        ),
-        MachineInterfaceAssociation::Switch(id) => (
-            "UPDATE machine_interfaces SET switch_id=$1, association_type=$2::association_type, \
+             WHERE id=$3::uuid RETURNING id";
+            (query, sqlx::query_as(query).bind(id).bind("Machine"))
+        }
+        MachineInterfaceAssociation::Switch(id) => {
+            let query = "UPDATE machine_interfaces SET switch_id=$1, association_type=$2::association_type, \
              interface_type='Bmc'::interface_type, primary_interface=false \
-             WHERE id=$3::uuid RETURNING id",
-            "Switch",
-            id.to_string(),
-        ),
-        MachineInterfaceAssociation::PowerShelf(id) => (
-            "UPDATE machine_interfaces SET power_shelf_id=$1, association_type=$2::association_type, \
+             WHERE id=$3::uuid RETURNING id";
+            (query, sqlx::query_as(query).bind(id).bind("Switch"))
+        }
+        MachineInterfaceAssociation::PowerShelf(id) => {
+            let query = "UPDATE machine_interfaces SET power_shelf_id=$1, association_type=$2::association_type, \
              interface_type='Bmc'::interface_type, primary_interface=false \
-             WHERE id=$3::uuid RETURNING id",
-            "PowerShelf",
-            id.to_string(),
-        ),
+             WHERE id=$3::uuid RETURNING id";
+            (query, sqlx::query_as(query).bind(id).bind("PowerShelf"))
+        }
     };
     // `primary_interface` is always forced to false here, so the one-primary
     // constraint cannot fire -- only the single-association one is relevant.
-    sqlx::query_as(query)
-        .bind(id_value)
-        .bind(association_type)
+    statement
         .bind(*interface_id)
         .fetch_one(txn)
         .await
@@ -519,26 +514,21 @@ pub async fn associate_interface_with_machine(
     association: MachineInterfaceAssociation,
     txn: &mut PgConnection,
 ) -> DatabaseResult<MachineInterfaceId> {
-    let (query, association_type, id_value) = match association {
-        MachineInterfaceAssociation::Machine(id) => (
-            "UPDATE machine_interfaces SET machine_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id",
-            "Machine",
-            id.to_string(),
-        ),
-        MachineInterfaceAssociation::Switch(id) => (
-            "UPDATE machine_interfaces SET switch_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id",
-            "Switch",
-            id.to_string(),
-        ),
-        MachineInterfaceAssociation::PowerShelf(id) => (
-            "UPDATE machine_interfaces SET power_shelf_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id",
-            "PowerShelf",
-            id.to_string(),
-        ),
+    let (query, statement) = match association {
+        MachineInterfaceAssociation::Machine(id) => {
+            let query = "UPDATE machine_interfaces SET machine_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id";
+            (query, sqlx::query_as(query).bind(id).bind("Machine"))
+        }
+        MachineInterfaceAssociation::Switch(id) => {
+            let query = "UPDATE machine_interfaces SET switch_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id";
+            (query, sqlx::query_as(query).bind(id).bind("Switch"))
+        }
+        MachineInterfaceAssociation::PowerShelf(id) => {
+            let query = "UPDATE machine_interfaces SET power_shelf_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id";
+            (query, sqlx::query_as(query).bind(id).bind("PowerShelf"))
+        }
     };
-    sqlx::query_as(query)
-        .bind(id_value)
-        .bind(association_type)
+    statement
         .bind(*interface_id)
         .fetch_one(txn)
         .await
@@ -993,11 +983,7 @@ async fn find_or_create_machine_interface_inner(
         is_primary,
         retained_window,
     } = options;
-    let relaystr = relays
-        .iter()
-        .map(|v| v.to_string())
-        .collect::<Vec<String>>()
-        .join(", ");
+    let relaystr = relays.iter().join(", ");
     match machine_id {
         None => {
             tracing::info!(
@@ -1060,11 +1046,7 @@ pub async fn find_or_create_observed_machine_interface(
         .as_ref()
         .and_then(|interface| interface.role.primary_interface_override());
     let interface_type = expected_interface_type.unwrap_or(InterfaceType::Data);
-    let relaystr = relays
-        .iter()
-        .map(|v| v.to_string())
-        .collect::<Vec<String>>()
-        .join(", ");
+    let relaystr = relays.iter().join(", ");
     match machine_id {
         None => {
             tracing::info!(
@@ -1472,10 +1454,8 @@ async fn validate_existing_mac_and_create_inner(
                 }
 
                 if let Some(address_family) = address_family {
-                    let candidate_segment_ids = network_segments
-                        .iter()
-                        .map(|segment| segment.id.to_string())
-                        .join(", ");
+                    let candidate_segment_ids =
+                        network_segments.iter().map(|segment| segment.id).join(", ");
 
                     // Reuse the existing dynamic create path unchanged: each
                     // candidate snapshot now exposes only the requested family,
@@ -2253,11 +2233,9 @@ async fn create_dynamic(
         }
     }
 
-    let segment_list = segments
-        .iter()
-        .map(|segment| format!("`{}` ({})", segment.config.name, segment.id))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let segment_list = segments.iter().format_with(", ", |segment, f| {
+        f(&format_args!("`{}` ({})", segment.config.name, segment.id))
+    });
 
     Err(DatabaseError::internal(format!(
         "ownership or hostname retries exhausted while allocating machine interface addresses from segments {segment_list}"
@@ -2293,7 +2271,7 @@ async fn create_static_path(
                 .or_else(|| segments.iter().find(|s| s.config.name == crate::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME))
                 .ok_or_else(|| DatabaseError::internal(format!(
                     "unable to find network segment that contains requested IP {address} in network segments: {}",
-                    segments.iter().map(|s| s.id.to_string()).join(", "),
+                    segments.iter().map(|s| s.id).join(", "),
                 ))
     )?;
 
@@ -2428,14 +2406,10 @@ async fn create_inner(
 ) -> DatabaseResult<MachineInterfaceId> {
     // Allocation must have produced at least one address for the new interface.
     if allocated_addresses.is_empty() {
-        let prefixes: Vec<_> = segment
-            .prefixes
-            .iter()
-            .map(|p| p.prefix.to_string())
-            .collect();
+        let prefixes = segment.prefixes.iter().map(|p| p.prefix).join(", ");
         return Err(crate::DatabaseError::ResourceExhausted(format!(
             "No IP addresses left in network segment (prefixes: {})",
-            prefixes.join(", ")
+            prefixes
         )));
     }
     // A brand-new interface has no stored name yet, so the configured strategy
@@ -4490,11 +4464,7 @@ async fn reconcile_interface_segment_candidates(
             "Network segment mismatch for existing MAC address: {} stored segment: {} discovery candidates: {}",
             existing_interface.mac_address,
             existing_interface.segment_id,
-            authoritative_segment_ids
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<String>>()
-                .join(", "),
+            authoritative_segment_ids.iter().join(", "),
         )));
     }
 

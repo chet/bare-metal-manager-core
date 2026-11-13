@@ -361,7 +361,7 @@ async fn test_set_primary_interface_records_same_target_operator_authority(
     .execute(&env.pool)
     .await?;
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await?;
 
@@ -435,7 +435,7 @@ async fn test_set_primary_interface_records_same_target_operator_authority(
             WHERE object_id = $1
         )",
     )
-    .bind(host_id.to_string())
+    .bind(host_id)
     .fetch_one(&env.pool)
     .await?;
     assert!(!is_queued, "source-only authority needs no Redfish work");
@@ -842,7 +842,7 @@ async fn test_set_primary_interface_promotes_a_non_primary_interface(
     );
 
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await?;
     let timepoint = env.redfish_sim.timepoint();
@@ -869,7 +869,7 @@ async fn test_set_primary_interface_promotes_a_non_primary_interface(
             WHERE object_id = $1
         )",
     )
-    .bind(host_id.to_string())
+    .bind(host_id)
     .fetch_one(&env.pool)
     .await?;
     assert!(
@@ -1327,7 +1327,7 @@ async fn test_set_primary_interface_hands_ready_intent_to_the_controller(
     };
 
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await?;
     env.api
@@ -1346,7 +1346,7 @@ async fn test_set_primary_interface_hands_ready_intent_to_the_controller(
             WHERE object_id = $1
         )",
     )
-    .bind(host_id.to_string())
+    .bind(host_id)
     .fetch_one(&env.pool)
     .await?;
     assert!(ready_is_queued, "the Ready host should be queued");
@@ -1370,7 +1370,7 @@ async fn test_set_primary_interface_hands_ready_intent_to_the_controller(
         .expect("the Ready request should persist its target");
 
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await?;
     let assigned_state = ManagedHostState::Assigned {
@@ -1398,7 +1398,7 @@ async fn test_set_primary_interface_hands_ready_intent_to_the_controller(
             WHERE object_id = $1
         )",
     )
-    .bind(host_id.to_string())
+    .bind(host_id)
     .fetch_one(&env.pool)
     .await?;
     assert!(

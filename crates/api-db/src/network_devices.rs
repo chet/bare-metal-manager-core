@@ -45,14 +45,13 @@ fn get_port_data<'a>(
     data: &'a [LldpSwitchData],
     port: &DpuLocalPorts,
 ) -> Result<&'a LldpSwitchData, LldpError> {
+    let port = port.to_string();
     let port_data = data
         .iter()
-        .filter(|x| x.local_port == port.to_string())
+        .filter(|x| x.local_port == port)
         .collect::<Vec<&LldpSwitchData>>();
 
-    let port_data = port_data
-        .first()
-        .ok_or(LldpError::MissingPort(port.to_string()))?;
+    let port_data = port_data.first().ok_or(LldpError::MissingPort(port))?;
 
     Ok(*port_data)
 }
@@ -79,7 +78,7 @@ where
             .map_err(|e| DatabaseError::new("network_devices All", e)),
         ObjectFilter::One(id) => {
             query.push(" WHERE l.id = ");
-            query.push_bind(id.to_string());
+            query.push_bind(id);
             query
                 .build_query_as::<NetworkDevice>()
                 .fetch_all(&mut *txn)
@@ -87,9 +86,8 @@ where
                 .map_err(|e| DatabaseError::new("network_devices One", e))
         }
         ObjectFilter::List(list) => {
-            let str_list: Vec<String> = list.iter().map(|id| id.to_string()).collect();
             query.push(" WHERE l.id = ANY(");
-            query.push_bind(str_list);
+            query.push_bind(list);
             query.push(")");
             query
                 .build_query_as::<NetworkDevice>()

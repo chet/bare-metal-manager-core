@@ -225,17 +225,15 @@ impl HealthReport {
         if let Some(previous) = previous {
             for prev_alert in previous.alerts.iter() {
                 if let Some(timestamp) = prev_alert.in_alert_since {
-                    previous_in_alert_times.insert(
-                        (prev_alert.id.clone(), prev_alert.target.clone()),
-                        timestamp,
-                    );
+                    previous_in_alert_times
+                        .insert((&prev_alert.id, prev_alert.target.as_deref()), timestamp);
                 }
             }
         }
 
         for alert in self.alerts.iter_mut() {
             alert.in_alert_since = Some(
-                match previous_in_alert_times.get(&(alert.id.clone(), alert.target.clone())) {
+                match previous_in_alert_times.get(&(&alert.id, alert.target.as_deref())) {
                     Some(time) => *time,
                     None => chrono::Utc::now(),
                 },
@@ -1195,12 +1193,12 @@ mod tests {
             }],
             triggered_by: None,
         };
+        let before_update = chrono::Utc::now();
         new2.update_in_alert_since(None);
-        assert!(new.alerts[0].in_alert_since.is_some());
-        assert_ne!(
-            new.alerts[0].in_alert_since,
-            Some("2024-01-01T19:00:01.100Z".parse().unwrap())
-        );
+        let after_update = chrono::Utc::now();
+        let in_alert_since = new2.alerts[0].in_alert_since.expect("new alert is stamped");
+        assert!((before_update..=after_update).contains(&in_alert_since));
+        assert_ne!(Some(in_alert_since), new2.observed_at);
     }
 
     #[test]

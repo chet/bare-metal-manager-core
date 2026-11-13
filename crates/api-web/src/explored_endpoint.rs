@@ -27,6 +27,7 @@ use axum::{Form, Json};
 use carbide_api_core::{Api, DefaultCredential};
 use carbide_utils::HostPortPair;
 use hyper::http::StatusCode;
+use itertools::Itertools;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{self as forgerpc, BmcEndpointRequest, admin_power_control_request};
 use rpc::site_explorer::{
@@ -237,7 +238,7 @@ pub(super) async fn show_html_all(
     let vendor_filter = params
         .get("vendor-filter")
         .cloned()
-        .unwrap_or("all".to_string());
+        .unwrap_or_else(|| "all".to_string());
     let is_errors_only = params
         .get("errors-only")
         .and_then(|v| v.parse::<bool>().ok())
@@ -360,7 +361,7 @@ pub(super) async fn show_html_unpaired(
     let vendor_filter = params
         .get("vendor-filter")
         .cloned()
-        .unwrap_or("all".to_string());
+        .unwrap_or_else(|| "all".to_string());
     let is_errors_only = params
         .get("errors-only")
         .and_then(|v| v.parse::<bool>().ok())
@@ -1444,18 +1445,13 @@ fn machine_setup_status_to_string(status: Option<&MachineSetupStatus>) -> String
         None => "Unable to fetch Machine Setup Status".to_string(),
         Some(s) if s.is_done => "OK".to_string(),
         Some(s) => {
-            let diffs_string = s
-                .diffs
-                .iter()
-                .map(|diff| {
-                    format!(
-                        "{} is '{}' expected '{}'",
-                        diff.key, diff.actual, diff.expected
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("Mismatch: {diffs_string}")
+            let diffs = s.diffs.iter().format_with(", ", |diff, formatter| {
+                formatter(&format_args!(
+                    "{} is '{}' expected '{}'",
+                    diff.key, diff.actual, diff.expected
+                ))
+            });
+            format!("Mismatch: {diffs}")
         }
     }
 }

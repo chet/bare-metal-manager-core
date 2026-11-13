@@ -22,6 +22,7 @@ use carbide_redfish::state_handler::state_handler_platform_error as platform_err
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use db::TransactionVending as _;
+use itertools::Itertools;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
 use libredfish::{EnabledDisabled, JobState, RedfishError};
@@ -109,11 +110,7 @@ pub(super) async fn handle_suppressing_site_explorer(
     } else {
         StateHandlerOutcome::wait(format!(
             "waiting for Site Explorer suppression acknowledgement: {}",
-            pending_macs
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            pending_macs.iter().join(", ")
         ))
     };
 
@@ -833,11 +830,7 @@ pub(super) async fn handle_waiting_for_oob_dhcp_acknowledgement(
     if !pending_macs.is_empty() {
         return Ok(StateHandlerOutcome::wait(format!(
             "waiting for OOB DHCP suppression acknowledgement: {}",
-            pending_macs
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            pending_macs.iter().join(", ")
         )));
     }
 
@@ -958,11 +951,7 @@ pub(super) async fn handle_waiting_for_bmc_dhcp_acknowledgement(
     if !pending_macs.is_empty() {
         return Ok(StateHandlerOutcome::wait(format!(
             "waiting for BMC DHCP suppression acknowledgement after factory reset: {}",
-            pending_macs
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+            pending_macs.iter().join(", ")
         )));
     }
 

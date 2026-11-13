@@ -533,7 +533,7 @@ async fn device_rotation_status_response(
 
     txn.commit().await?;
 
-    let status = status.ok_or(CarbideError::NotFoundError {
+    let status = status.ok_or_else(|| CarbideError::NotFoundError {
         kind: "device_credential_rotation",
         id: device_mac.to_string(),
     })?;

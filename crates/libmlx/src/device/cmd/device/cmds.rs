@@ -180,12 +180,12 @@ fn print_devices_table(devices: &[MlxDeviceInfo]) {
     // Add device rows.
     for device in devices {
         table.add_row(Row::new(vec![
-            Cell::new(&device.pci_name_pretty()),
+            Cell::new(&device.pci_name),
             Cell::new(&device.base_mac_pretty()),
-            Cell::new(&device.psid_pretty()),
-            Cell::new(&device.device_type_pretty()),
-            Cell::new(&device.part_number_pretty()),
-            Cell::new(&device.fw_version_current_pretty()),
+            Cell::new(device.psid.as_deref().unwrap_or("--")),
+            Cell::new(&device.device_type),
+            Cell::new(device.part_number.as_deref().unwrap_or("--")),
+            Cell::new(device.fw_version_current.as_deref().unwrap_or("--")),
         ]));
     }
 

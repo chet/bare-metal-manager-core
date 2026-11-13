@@ -314,10 +314,7 @@ pub fn parse_mlx_show_confs(content: &str) -> MlxVariableRegistry {
                 }
             }
 
-            // Clean up description -- remove extra whitespace and truncate if too long.
-            description = description.split_whitespace().collect::<Vec<_>>().join(" ");
-
-            // More aggressive cleaning for problematic characters.
+            // Normalize whitespace before truncating long descriptions.
             description = clean_description(&description);
 
             if description.len() > 120 {
@@ -350,11 +347,7 @@ pub fn parse_mlx_show_confs(content: &str) -> MlxVariableRegistry {
 }
 
 fn clean_description(desc: &str) -> String {
-    desc.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string()
+    desc.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn parse_variable_type(type_str: &str) -> MlxVariableSpec {

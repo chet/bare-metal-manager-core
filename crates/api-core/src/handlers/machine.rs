@@ -1136,7 +1136,7 @@ pub(crate) async fn admin_force_delete_machine(
                 },
             )
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: host_machine.id.to_string(),
             })?;
@@ -1177,7 +1177,7 @@ pub(crate) async fn admin_force_delete_machine(
                 LoadSnapshotOptions::default(),
             )
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: host_machine.id.to_string(),
             })?;

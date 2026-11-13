@@ -236,14 +236,12 @@ mod tests {
         );
     }
 
-    // An empty interface list deserializes cleanly -- older payloads may omit
-    // interfaces entirely.
+    // Older payloads may omit interfaces entirely; default them to an empty list.
     #[test]
     fn deserialize_legacy_ib_status_empty_interfaces() {
-        let obs: MachineInfinibandStatusObservation = serde_json::from_str(
-            r#"{"observed_at": "2024-12-18T23:17:57.919166804Z", "ib_interfaces": []}"#,
-        )
-        .expect("empty interface list should deserialize");
+        let obs: MachineInfinibandStatusObservation =
+            serde_json::from_str(r#"{"observed_at": "2024-12-18T23:17:57.919166804Z"}"#)
+                .expect("omitted interface list should default to empty");
         assert!(obs.ib_interfaces.is_empty());
     }
 

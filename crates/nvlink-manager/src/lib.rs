@@ -26,6 +26,7 @@ mod rack_alert;
 mod switch_cert_monitor;
 mod switch_reachability;
 
+use std::fmt::Write;
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -482,13 +483,6 @@ pub struct PartitionProcessingContext {
     unknown_partition_addition_operations: HashMap<u32, NmxcPartitionOperation>,
     /// Pending NMX-C `Create` for tray default partitions (key: GPU `slot_id`), merged after scanning hosts.
     pending_tray_partition_creates_by_slot: HashMap<i32, NmxcPartitionOperation>,
-}
-
-fn nmx_c_partition_id_string(pi: &PartitionInfo) -> String {
-    pi.partition_id
-        .as_ref()
-        .map(|id| id.partition_id.to_string())
-        .unwrap_or_default()
 }
 
 fn is_nmx_c_default_partition(partition: &PartitionInfo) -> bool {
@@ -1141,7 +1135,7 @@ impl PartitionProcessingContext {
                         ops.push(operation.clone());
                     }
                 })
-                .or_insert(vec![operation.clone()]);
+                .or_insert_with(|| vec![operation.clone()]);
         } else {
             let operation = NmxcPartitionOperation {
                 domain_uuid: None,
@@ -1161,7 +1155,7 @@ impl PartitionProcessingContext {
                         ops.push(operation.clone());
                     }
                 })
-                .or_insert(vec![operation.clone()]);
+                .or_insert_with(|| vec![operation.clone()]);
         }
         Ok(())
     }
@@ -2237,12 +2231,15 @@ impl NvlPartitionMonitor {
 
         // Endpoint + component versions for this group, so the metric-read failures below log them.
         group_metrics.nmxc.endpoint = endpoint_url.to_string();
-        group_metrics.nmxc.version = hello
-            .components_ver
-            .iter()
-            .map(|kv| format!("{}={}", kv.key, kv.value))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut version = String::new();
+        for (index, component) in hello.components_ver.iter().enumerate() {
+            if index != 0 {
+                version.push_str(", ");
+            }
+            write!(version, "{}={}", component.key, component.value)
+                .expect("writing to a String cannot fail");
+        }
+        group_metrics.nmxc.version = version;
 
         // Filter managed host snapshots, nvlink info, and DB partitions for this group.
         let mut managed_host_snapshots_domain: HashMap<HostMachineId, ManagedHostStateSnapshot> =
@@ -2781,7 +2778,7 @@ impl NvlPartitionMonitor {
         // rechecked against it: a partition that reappeared while the pass
         // ran, as during fabric restoration, keeps its row and its miss count
         // starts over.
-        let nmx_c_partitions: HashMap<String, PartitionInfo> =
+        let nmx_c_partitions: HashMap<Option<u32>, PartitionInfo> =
             if completed_nmx_c_operations.is_empty() && missing_partitions.is_empty() {
                 HashMap::new()
             } else {
@@ -2804,7 +2801,7 @@ impl NvlPartitionMonitor {
                     })?
                     .partition_info_list
                     .into_iter()
-                    .map(|p| (nmx_c_partition_id_string(&p), p))
+                    .map(|p| (p.partition_id.as_ref().map(|id| id.partition_id), p))
                     .collect()
             };
 
@@ -2822,7 +2819,7 @@ impl NvlPartitionMonitor {
         let listed_again: Vec<NvLinkPartitionId> = missing_partitions
             .iter()
             .filter(|(_, nmx_c_partition_id)| {
-                nmx_c_partitions.contains_key(&nmx_c_partition_id.to_string())
+                nmx_c_partitions.contains_key(&Some(*nmx_c_partition_id))
             })
             .map(|(id, _)| *id)
             .collect();
@@ -3427,7 +3424,7 @@ impl NvlPartitionMonitor {
                     .and_modify(|ops| {
                         ops.push(operation.clone());
                     })
-                    .or_insert(vec![operation.clone()]);
+                    .or_insert_with(|| vec![operation.clone()]);
             }
         }
         for operation in partition_ctx.unknown_partition_addition_operations.values() {
@@ -3437,7 +3434,7 @@ impl NvlPartitionMonitor {
                 .and_modify(|ops| {
                     ops.push(operation.clone());
                 })
-                .or_insert(vec![operation.clone()]);
+                .or_insert_with(|| vec![operation.clone()]);
         }
         for (_, operation) in
             std::mem::take(&mut partition_ctx.pending_tray_partition_creates_by_slot)
@@ -3739,16 +3736,13 @@ impl NvlPartitionMonitor {
                         let name = if is_tray_partition {
                             operation.name.chars().take(240).collect::<String>()
                         } else {
-                            let name = format!(
-                                "{}{}",
-                                logical_partition_id,
-                                operation
-                                    .gpu_uids
-                                    .iter()
-                                    .map(|u| u.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join(",")
-                            );
+                            let mut name = logical_partition_id.to_string();
+                            for (index, gpu_uid) in operation.gpu_uids.iter().enumerate() {
+                                if index != 0 {
+                                    name.push(',');
+                                }
+                                write!(name, "{gpu_uid}").expect("writing to a String cannot fail");
+                            }
                             name.chars().take(240).collect::<String>()
                         };
                         let request = nmx_c_create_partition_request(
@@ -3943,7 +3937,7 @@ impl NvlPartitionMonitor {
         &self,
         txn: &mut db::Transaction<'_>,
         completed_nmx_c_operations: HashMap<NvLinkLogicalPartitionId, Vec<NmxcPartitionOperation>>,
-        nmx_c_partitions: &HashMap<String, PartitionInfo>,
+        nmx_c_partitions: &HashMap<Option<u32>, PartitionInfo>,
     ) -> NvLinkManagerResult<()> {
         for (logical_partition_id, operations) in completed_nmx_c_operations {
             for operation in operations {
