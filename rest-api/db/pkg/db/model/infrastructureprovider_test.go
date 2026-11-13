@@ -286,7 +286,7 @@ func TestInfrastructureProviderSQLDAO_Create(t *testing.T) {
 			assert.Equal(t, tt.want.Org, got.Org)
 			assert.Equal(t, *tt.want.OrgDisplayName, *got.OrgDisplayName)
 			assert.Equal(t, tt.want.CreatedBy, got.CreatedBy)
-			assert.NotEqual(t, tt.want.Updated.String(), got.Updated.String())
+			assert.False(t, tt.want.Updated.Equal(got.Updated))
 
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
@@ -387,7 +387,7 @@ func TestInfrastructureProviderSQLDAO_Update(t *testing.T) {
 			assert.Equal(t, tt.want.Name, got.Name)
 			assert.Equal(t, *tt.want.DisplayName, *got.DisplayName)
 			assert.Equal(t, tt.want.Org, got.Org)
-			assert.NotEqual(t, tt.want.Updated.String(), got.Updated.String())
+			assert.False(t, tt.want.Updated.Equal(got.Updated))
 
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

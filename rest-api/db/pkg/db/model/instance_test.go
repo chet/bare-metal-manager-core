@@ -2951,7 +2951,7 @@ func TestInstanceSQLDAO_Update(t *testing.T) {
 					assert.Equal(t, *tc.expectedTpmEkCertificate, *got.TpmEkCertificate)
 				}
 
-				if got.Updated.String() == tc.instance.Updated.String() {
+				if got.Updated.Equal(tc.instance.Updated) {
 					t.Errorf("got.Updated = %v, want different value", got.Updated)
 				}
 

@@ -235,13 +235,13 @@ func NewElektraConfig(utMode bool) *conftypes.Config {
 		log.Fatal().Msg("error loading config, empty Pod Namespace")
 	}
 
-	conf.EnableDebug = strings.ToLower(enableDebug) == "true"
-	conf.DevMode = strings.ToLower(devmode) == "true"
-	conf.EnableTLS = strings.ToLower(enableTLS) == "true"
-	conf.DisableBootstrap = strings.ToLower(disableBootstrap) == "true"
-	conf.CoreGrpc.SkipServerAuth = strings.ToLower(skipCoreGrpcServerAuth) == "true"
-	conf.FlowGrpc.SkipServerAuth = strings.ToLower(skipFlowGrpcServerAuth) == "true"
-	conf.FlowGrpc.Enabled = strings.ToLower(flowGrpcEnabled) == "true"
+	conf.EnableDebug = strings.EqualFold(enableDebug, "true")
+	conf.DevMode = strings.EqualFold(devmode, "true")
+	conf.EnableTLS = strings.EqualFold(enableTLS, "true")
+	conf.DisableBootstrap = strings.EqualFold(disableBootstrap, "true")
+	conf.CoreGrpc.SkipServerAuth = strings.EqualFold(skipCoreGrpcServerAuth, "true")
+	conf.FlowGrpc.SkipServerAuth = strings.EqualFold(skipFlowGrpcServerAuth, "true")
+	conf.FlowGrpc.Enabled = strings.EqualFold(flowGrpcEnabled, "true")
 
 	// Initialize the WatcherInterval to default if not defined
 	if watcherInterval == "" {

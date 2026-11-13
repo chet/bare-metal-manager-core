@@ -1083,7 +1083,7 @@ func TestInstanceTypeSQLDAO_Update(t *testing.T) {
 			assert.Equal(t, *tc.expectedStatus, got.Status)
 			assert.True(t, tc.expectedVersion == nil || got.Version == *tc.expectedVersion)
 
-			if got.Updated.String() == it1.Updated.String() {
+			if got.Updated.Equal(it1.Updated) {
 				t.Errorf("got.Updated = %v, want different value", got.Updated)
 			}
 

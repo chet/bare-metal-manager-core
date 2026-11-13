@@ -758,7 +758,7 @@ func TestAllocationConstraintSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedConstraintValue, got.ConstraintValue)
 				assert.Equal(t, tc.expectedDerivedResourceID, got.DerivedResourceID)
 
-				if tc.expectedUpdate && got.Updated.String() == a1.Updated.String() {
+				if tc.expectedUpdate && got.Updated.Equal(a1.Updated) {
 					t.Errorf("got.Updated = %v, want different value", got.Updated)
 				}
 			}

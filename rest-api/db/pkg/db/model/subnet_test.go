@@ -1485,7 +1485,7 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 					}
 				}
 
-				if got.Updated.String() == subnet1.Updated.String() {
+				if got.Updated.Equal(subnet1.Updated) {
 					t.Errorf("got.Updated = %v, want different value", got.Updated)
 				}
 

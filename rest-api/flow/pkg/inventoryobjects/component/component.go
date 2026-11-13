@@ -6,7 +6,6 @@ package component
 import (
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/google/uuid"
 
@@ -129,7 +128,7 @@ func (c *Component) IsCompute() bool {
 func (c *Component) Patch(p Component, allowNew bool) bool {
 	patched := false
 	if len(p.FirmwareVersion) > 0 &&
-		strings.Compare(p.FirmwareVersion, c.FirmwareVersion) != 0 {
+		p.FirmwareVersion != c.FirmwareVersion {
 		c.FirmwareVersion = p.FirmwareVersion
 		patched = true
 	}

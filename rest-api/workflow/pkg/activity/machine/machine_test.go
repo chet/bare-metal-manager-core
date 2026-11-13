@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -483,7 +484,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 					Memory: []*corev1.MachineCapabilityAttributesMemory{
 						{
 							Name:     "DDR4",
-							Capacity: cutil.GetPtr(fmt.Sprintf("%d", memSize)),
+							Capacity: cutil.GetPtr(strconv.FormatUint(uint64(memSize), 10)),
 							Count:    8,
 						},
 						{

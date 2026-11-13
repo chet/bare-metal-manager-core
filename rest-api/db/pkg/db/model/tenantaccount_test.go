@@ -1158,7 +1158,7 @@ func TestTenantAccountSQLDAO_Update(t *testing.T) {
 			}
 			assert.Equal(t, *tc.expectedStatus, got.Status)
 
-			if got.Updated.String() == tc.ta.Updated.String() {
+			if got.Updated.Equal(tc.ta.Updated) {
 				t.Errorf("got.Updated = %v, want different value", got.Updated)
 			}
 

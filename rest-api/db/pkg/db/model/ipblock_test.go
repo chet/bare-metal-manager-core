@@ -1594,7 +1594,7 @@ func TestIPBlockSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedFullGrant, got.FullGrant)
 			}
 
-			if got.Updated.String() == tc.ipb.Updated.String() {
+			if got.Updated.Equal(tc.ipb.Updated) {
 				t.Errorf("got.Updated = %v, want different value", got.Updated)
 			}
 

@@ -65,19 +65,50 @@ func TestPatch(t *testing.T) {
 		parsedIPs = append(parsedIPs, net.ParseIP(ip))
 	}
 
-	bmc := BMC{MAC: MACAddress{HardwareAddr: hwAddrs[0]}, IP: parsedIPs[0], Credential: credPtr(creds[0])}
+	testCases := []struct {
+		name        string
+		baseMAC     net.HardwareAddr
+		toMAC       net.HardwareAddr
+		wantPatched bool
+	}{
+		{
+			name:    "no patch if MAC differs",
+			baseMAC: hwAddrs[0],
+			toMAC:   hwAddrs[1],
+		},
+		{
+			name:        "patch when MAC matches",
+			baseMAC:     hwAddrs[0],
+			toMAC:       hwAddrs[0],
+			wantPatched: true,
+		},
+		{
+			name:        "nil and empty MAC match",
+			baseMAC:     nil,
+			toMAC:       net.HardwareAddr{},
+			wantPatched: true,
+		},
+		{
+			name:    "no patch if MAC lengths differ",
+			baseMAC: hwAddrs[0],
+			toMAC:   append(append(net.HardwareAddr{}, hwAddrs[0]...), 0x66, 0x77),
+		},
+	}
 
-	// Test case 1: no patch if the mac is different
-	nb0 := BMC{MAC: MACAddress{HardwareAddr: hwAddrs[1]}, IP: parsedIPs[1], Credential: credPtr(creds[1])}
-	patched := bmc.Patch(nb0)
-	assert.False(t, patched)
-	assert.Equal(t, parsedIPs[0], bmc.IP)
-	assert.Equal(t, &creds[0], bmc.Credential)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			bmc := BMC{MAC: MACAddress{HardwareAddr: tc.baseMAC}, IP: parsedIPs[0], Credential: credPtr(creds[0])}
+			to := BMC{MAC: MACAddress{HardwareAddr: tc.toMAC}, IP: parsedIPs[1], Credential: credPtr(creds[1])}
 
-	// Test case 2: patched on the changed information
-	nb1 := BMC{MAC: MACAddress{HardwareAddr: hwAddrs[0]}, IP: parsedIPs[1], Credential: credPtr(creds[1])}
-	patched = bmc.Patch(nb1)
-	assert.True(t, patched)
-	assert.Equal(t, parsedIPs[1], bmc.IP)
-	assert.Equal(t, &creds[1], bmc.Credential)
+			patched := bmc.Patch(to)
+			assert.Equal(t, tc.wantPatched, patched)
+			if tc.wantPatched {
+				assert.Equal(t, parsedIPs[1], bmc.IP)
+				assert.Equal(t, &creds[1], bmc.Credential)
+			} else {
+				assert.Equal(t, parsedIPs[0], bmc.IP)
+				assert.Equal(t, &creds[0], bmc.Credential)
+			}
+		})
+	}
 }

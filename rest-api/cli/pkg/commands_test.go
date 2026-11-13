@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2164,7 +2165,7 @@ func testNewApp_VpcPeeringList(t *testing.T) {
 			for index, query := range requests {
 				assert.Equal(t, test.wantRelations, query["includeRelation"])
 				if len(test.pages) > 1 {
-					assert.Equal(t, fmt.Sprint(index+1), query.Get("pageNumber"))
+					assert.Equal(t, strconv.Itoa(index+1), query.Get("pageNumber"))
 					assert.Equal(t, "100", query.Get("pageSize"))
 				}
 			}

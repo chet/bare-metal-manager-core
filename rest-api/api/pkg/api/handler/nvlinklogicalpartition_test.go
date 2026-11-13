@@ -1170,10 +1170,10 @@ func TestNVLinkLogicalPartitionHandler_GetAll(t *testing.T) {
 				q.Add("status", *tc.queryStatus)
 			}
 			if tc.queryIncludeVpcs != nil {
-				q.Add("includeVpcs", fmt.Sprintf("%v", *tc.queryIncludeVpcs))
+				q.Add("includeVpcs", strconv.FormatBool(*tc.queryIncludeVpcs))
 			}
 			if tc.queryIncludeInterfaces != nil {
-				q.Add("includeInterfaces", fmt.Sprintf("%v", *tc.queryIncludeInterfaces))
+				q.Add("includeInterfaces", strconv.FormatBool(*tc.queryIncludeInterfaces))
 			}
 			if tc.queryIncludeRelations1 != nil {
 				q.Add("includeRelation", *tc.queryIncludeRelations1)
@@ -1185,10 +1185,10 @@ func TestNVLinkLogicalPartitionHandler_GetAll(t *testing.T) {
 				q.Add("includeRelation", *tc.queryIncludeRelations3)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)

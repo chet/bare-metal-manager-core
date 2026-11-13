@@ -4,6 +4,7 @@
 package dao
 
 import (
+	"bytes"
 	"net"
 	"testing"
 
@@ -99,10 +100,10 @@ func TestPmcTo(t *testing.T) {
 			if daoObj == nil {
 				t.Fatalf("PmcTo returned nil for valid input")
 			}
-			if daoObj.MacAddress.String() != obj.GetMac().String() {
+			if !bytes.Equal(daoObj.MacAddress, obj.GetMac()) {
 				t.Errorf("MacAddress mismatch: got %q, want %q", daoObj.MacAddress.String(), obj.GetMac().String())
 			}
-			if daoObj.IPAddress.String() != obj.GetIp().String() {
+			if !daoObj.IPAddress.IP().Equal(obj.GetIp()) {
 				t.Errorf("IPAddress mismatch: got %q, want %q", daoObj.IPAddress.String(), obj.GetIp().String())
 			}
 			if daoObj.Vendor != obj.GetVendor().Code {

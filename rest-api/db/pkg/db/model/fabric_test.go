@@ -452,7 +452,7 @@ func TestFabricSQLDAO_Update(t *testing.T) {
 			assert.Equal(t, tc.expectError, err != nil)
 			if err == nil {
 				assert.Equal(t, tc.id, got.ID)
-				assert.Equal(t, tc.expectedIpID.String(), got.InfrastructureProviderID.String())
+				assert.Equal(t, *tc.expectedIpID, got.InfrastructureProviderID)
 				assert.Equal(t, *tc.expectedStatus, got.Status)
 				assert.Equal(t, true, got.IsMissingOnSite)
 			}

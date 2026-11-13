@@ -1670,7 +1670,7 @@ func TestMachineSQLDAO_Update(t *testing.T) {
 					assert.Equal(t, *tc.input.IsMissingOnSite, got.IsMissingOnSite)
 				}
 
-				if got.Updated.String() == mcsExp[1].Updated.String() {
+				if got.Updated.Equal(mcsExp[1].Updated) {
 					t.Errorf("got.Updated = %v, want different value", got.Updated)
 				}
 
