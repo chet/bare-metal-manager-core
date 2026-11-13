@@ -152,6 +152,19 @@ impl RedfishClientPool for ProxiedRedfishPool {
             .await
     }
 
+    async fn create_client_without_mutation_retries(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        self.inner
+            .current()
+            .create_client_without_mutation_retries(host, port, auth, vendor)
+            .await
+    }
+
     fn credential_reader(&self) -> &dyn CredentialReader {
         &*self.credential_reader
     }

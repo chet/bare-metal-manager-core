@@ -3,16 +3,19 @@
 
 //! A hardware command's durable ownership, independent of its transport connection.
 
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::instance::InstanceId;
+use carbide_uuid::machine::{HostMachineId, MachineId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::bmc_info::BmcInfo;
 
 /// `HardwareDispatch` records the last command reserved on a host.
 /// An unsettled command excludes NIC work without consuming an update-manager
 /// slot. Settlement retains the record until another command replaces it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HardwareDispatch {
-    /// Scout stream flow identity, assigned before the command is sent.
+    /// Request identity, assigned before the command is sent.
     pub token: uuid::Uuid,
     /// Sender and expected completion, never inferred from inventory.
     pub owner: HardwareDispatchOwner,
@@ -33,6 +36,18 @@ impl HardwareDispatch {
 /// The sender allowed to settle a command using its exact token.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HardwareDispatchOwner {
+    /// An ordinary instance reboot reconciled by the machine controller.
+    InstanceReboot {
+        /// Host whose existing power controller executes the request.
+        machine_id: HostMachineId,
+        /// Allocation that authorized the reboot.
+        instance_id: InstanceId,
+        /// Captured BMC routing. IP, port and credential MAC must still match before sending.
+        bmc: BmcInfo,
+        /// Start of the most recent attempt, persisted before the external request.
+        /// Absence means no attempt has been authorized. Expiry permits retry, not settlement.
+        last_attempt_at: Option<DateTime<Utc>>,
+    },
     /// An MLX admin request sent through one Scout's command stream.
     MlxAdmin {
         /// Host or attached DPU whose Scout receives the request.

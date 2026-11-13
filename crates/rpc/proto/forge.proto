@@ -3852,6 +3852,9 @@ message InstancePowerRequest {
   common.InstanceId instance_id = 5;
 }
 
+// Acknowledges a durably accepted reboot request. The machine controller performs
+// the reboot asynchronously; this response does not report BMC acceptance or OS boot
+// completion. Power failures remain visible through machine controller status.
 message InstancePowerResult {
 }
 

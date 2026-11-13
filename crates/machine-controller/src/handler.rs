@@ -150,6 +150,7 @@ mod gb200_host_interface;
 mod helpers;
 mod host_boot_config;
 mod host_uefi_rotation;
+mod instance_reboot;
 mod machine_validation;
 mod maintenance;
 mod nic_firmware;
@@ -938,6 +939,12 @@ impl MachineStateHandler {
         {
             // Box both NIC dispatch paths to limit the shared transition's stack use.
             return Box::pin(nic_firmware::handle(mh_snapshot, operation, ctx)).await;
+        }
+
+        // Ordinary tenant reboots are work owned by this controller. Keep normal
+        // health/metric bookkeeping above, and leave PXE/reprovision state untouched.
+        if let Some(outcome) = instance_reboot::handle(mh_snapshot, ctx).await? {
+            return Ok(outcome);
         }
 
         // `ReadyBootConfigState::Prepare` must consume a snapshot with current
@@ -13908,12 +13915,32 @@ pub async fn handler_host_power_control_with_location(
     location: &std::panic::Location<'_>,
     requested_at: Option<DateTime<Utc>>,
 ) -> Result<(), StateHandlerError> {
-    let mut action = action;
     let bmc = ctx
         .services
         .connect_bmc(&managedhost_snapshot.host_snapshot)
         .await?;
+    handler_host_power_control_with_bmc(
+        managedhost_snapshot,
+        ctx,
+        bmc,
+        action,
+        location,
+        requested_at,
+    )
+    .await
+}
 
+// The queued instance path prepares its client before rechecking durable ownership.
+// Both callers retain the same power-state, vendor/IPMI and request-tracking behavior.
+async fn handler_host_power_control_with_bmc(
+    managedhost_snapshot: &ManagedHostStateSnapshot,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    bmc: BackendBmc,
+    action: ResetType,
+    location: &std::panic::Location<'_>,
+    requested_at: Option<DateTime<Utc>>,
+) -> Result<(), StateHandlerError> {
+    let mut action = action;
     let power_state = power_state(&bmc)
         .await
         .map_err(|e| platform_error("get_power_state", e))?;

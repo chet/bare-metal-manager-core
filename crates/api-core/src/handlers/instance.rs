@@ -21,8 +21,6 @@ use std::str::FromStr;
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, AdminForceDeleteMachineResponse};
 use ::rpc::model::RpcTryFrom;
-use bmc_platform::{PlatformError, ResetType};
-use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{HostMachineId, MachineId};
@@ -1114,17 +1112,23 @@ pub(crate) async fn invoke_power(
         .into());
     }
 
+    if db::hardware_dispatch::has_pending(&mut txn, machine_id).await? {
+        return Err(CarbideError::FailedPrecondition(
+            "instance power control is blocked by an unfinished hardware request".into(),
+        )
+        .into());
+    }
+
     // Log tenant organization ID
     if let Some(ref instance) = snapshot.instance {
         log_tenant_organization_id(instance.config.tenant.tenant_organization_id.as_str());
     }
 
-    let bmc_ip = snapshot
+    snapshot
         .host_snapshot
         .status
         .bmc_info
         .ip
-        .as_ref()
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "bmc_ip",
             id: machine_id.to_string(),
@@ -1141,22 +1145,9 @@ pub(crate) async fn invoke_power(
         })
         .unwrap_or_default();
 
-    // Determine if we should let the state machine handle the reboot.
-    // This is true when:
-    // 1. The machine is in Assigned/Ready state, AND
-    // 2. The instance needs to PXE boot (either always-PXE or explicit request)
-    //
-    // In this case, we set the custom_pxe_reboot_requested flag and return early.
-    // The Assigned/Ready handler will pick up the flag, verify boot order via
-    // HostPlatformConfiguration, and initiate the reboot.
-    //
-    // Otherwise, we issue a synchronous Redfish reboot directly.
-    // Determine how to handle the reboot based on the instance configuration and request.
-    //
-    // For custom PXE or always-PXE instances in Ready state, we use the state machine to
-    // verify boot order before rebooting. For regular reboots, we clear the use_custom_pxe_on_boot
-    // flag so the iPXE handler returns "exit" (boot from disk).
-    let use_state_machine_for_reboot = matches!(
+    // PXE requests use the existing boot-order verification flow. Ordinary reboots
+    // are queued separately without changing the instance's boot mode.
+    let needs_boot_order_verification = matches!(
         snapshot.managed_state,
         ManagedHostState::Assigned {
             instance_state: InstanceState::Ready,
@@ -1164,7 +1155,7 @@ pub(crate) async fn invoke_power(
     ) && (run_provisioning_instructions_on_every_boot
         || request.boot_with_custom_ipxe);
 
-    if use_state_machine_for_reboot {
+    if needs_boot_order_verification {
         db::instance::set_custom_pxe_reboot_requested(&machine_id, true, &mut txn).await?;
     }
 
@@ -1178,7 +1169,7 @@ pub(crate) async fn invoke_power(
     // For non-always-PXE instances, set use_custom_pxe_on_boot based on the request.
     // This tells the iPXE handler whether to serve the custom script or return "exit".
     // If we are using the state machine for a custom pxe reboot, let the state machine set the use_custom_ipxe_on_next_boot flag.
-    if !use_state_machine_for_reboot && !run_provisioning_instructions_on_every_boot {
+    if !needs_boot_order_verification && !run_provisioning_instructions_on_every_boot {
         db::instance::use_custom_ipxe_on_next_boot(
             &machine_id,
             request.boot_with_custom_ipxe,
@@ -1242,51 +1233,41 @@ pub(crate) async fn invoke_power(
         }
     }
 
-    txn.commit().await?;
-
-    if reprovision_handled {
-        // Host will reboot once DPU reprovisioning is successfully finished.
-        return Ok(Response::new(rpc::InstancePowerResult {}));
-    }
-
-    // If using state machine for reboot, return early. The flag was set above and the
-    // Assigned/Ready handler will pick it up, verify BIOS boot order, and initiate the reboot.
-    if use_state_machine_for_reboot {
-        tracing::info!(
-            machine_id = %machine_id,
-            run_provisioning_instructions_on_every_boot,
-            boot_with_custom_ipxe = request.boot_with_custom_ipxe,
-            "Delegating reboot to state machine for boot order verification"
-        );
-        return Ok(Response::new(rpc::InstancePowerResult {}));
-    }
-
-    let bmc_mac_address =
-        snapshot
-            .host_snapshot
-            .status
-            .bmc_info
-            .mac
+    if !reprovision_handled && !needs_boot_order_verification {
+        let instance = snapshot
+            .instance
+            .as_ref()
             .ok_or_else(|| CarbideError::NotFoundError {
-                kind: "bmc_mac",
-                id: machine_id.to_string(),
+                kind: "instance",
+                id: instance_id.to_string(),
             })?;
-
-    // TODO: The API call should maybe not directly trigger the reboot
-    // but instead queue it for the state handler. That will avoid racing
-    // with other internal reboot requests from the state handler.
-    let bmc = api
-        .connect_bmc(&BmcAccessInfo {
-            host: bmc_ip.to_string(),
-            port: snapshot.host_snapshot.status.bmc_info.port,
-            mac_address: bmc_mac_address,
-        })
-        .await?;
-    async { bmc.power()?.set(ResetType::ForceRestart).await }
-        .await
-        .map_err(|e: PlatformError| {
-            CarbideError::internal(format!("failed redfish ForceRestart subtask: {e}"))
+        if instance.deleted.is_some() {
+            return Err(CarbideError::FailedPrecondition(
+                "cannot reboot a terminating instance".into(),
+            )
+            .into());
+        }
+        let bmc = &snapshot.host_snapshot.status.bmc_info;
+        bmc.mac.ok_or_else(|| CarbideError::NotFoundError {
+            kind: "bmc_mac",
+            id: machine_id.to_string(),
         })?;
+        db::hardware_dispatch::begin(
+            &mut txn,
+            uuid::Uuid::new_v4(),
+            &model::hardware_dispatch::HardwareDispatchOwner::InstanceReboot {
+                machine_id,
+                instance_id,
+                bmc: bmc.clone(),
+                last_attempt_at: None,
+            },
+        )
+        .await?;
+    }
+
+    // Acceptance is durable before the caller returns. Only the machine controller sends
+    // ordinary reboots; PXE and reprovision continue through their existing request flags.
+    txn.commit().await?;
 
     Ok(Response::new(rpc::InstancePowerResult {}))
 }

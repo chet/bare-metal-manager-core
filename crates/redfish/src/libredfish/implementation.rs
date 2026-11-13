@@ -67,11 +67,11 @@ impl RedfishClientPoolImpl {
     }
 }
 
-#[async_trait]
-impl RedfishClientPool for RedfishClientPoolImpl {
-    #[tracing::instrument(name = "redfish_create_client", skip_all, fields(bmc_host = host))]
-    async fn create_client(
+impl RedfishClientPoolImpl {
+    /// Preserve the ordinary client path while choosing its transport retry policy.
+    async fn create_client_with_pool(
         &self,
+        pool: &libredfish::RedfishClientPool,
         host: &str,
         port: Option<u16>,
         auth: RedfishAuth,
@@ -159,8 +159,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
             None => instrumented_redfish_initialization(
                 "create_client",
                 authentication_sensitive_values.iter().map(String::as_str),
-                self.pool
-                    .create_client_with_custom_headers(endpoint, custom_headers),
+                pool.create_client_with_custom_headers(endpoint, custom_headers),
             )
             .await
             .map_err(RedfishClientCreationError::RedfishError)?,
@@ -171,8 +170,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
             // path (create_client_with_vendor) makes HTTP calls to /Systems,
             // /Managers, etc. that fail with 401 on BMCs requiring auth.
             // With no I/O here, there is no external call to meter either.
-            Some(RedfishVendor::Unknown) => self
-                .pool
+            Some(RedfishVendor::Unknown) => pool
                 .create_standard_client_with_custom_headers(endpoint, custom_headers)
                 .map_err(RedfishClientCreationError::RedfishError)
                 .map(|c| c as Box<dyn Redfish>)?,
@@ -180,8 +178,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
             Some(vendor) => instrumented_redfish_initialization(
                 "create_client",
                 authentication_sensitive_values.iter().map(String::as_str),
-                self.pool
-                    .create_client_with_vendor(endpoint, vendor, custom_headers),
+                pool.create_client_with_vendor(endpoint, vendor, custom_headers),
             )
             .await
             .map_err(RedfishClientCreationError::RedfishError)?,
@@ -193,6 +190,34 @@ impl RedfishClientPool for RedfishClientPoolImpl {
             client,
             authentication_sensitive_values,
         )))
+    }
+}
+
+#[async_trait]
+impl RedfishClientPool for RedfishClientPoolImpl {
+    #[tracing::instrument(name = "redfish_create_client", skip_all, fields(bmc_host = host))]
+    async fn create_client(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        self.create_client_with_pool(&self.pool, host, port, auth, vendor)
+            .await
+    }
+
+    #[tracing::instrument(name = "redfish_create_client", skip_all, fields(bmc_host = host))]
+    async fn create_client_without_mutation_retries(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        let pool = self.pool.without_mutation_retries();
+        self.create_client_with_pool(&pool, host, port, auth, vendor)
+            .await
     }
 
     fn credential_reader(&self) -> &dyn CredentialReader {
@@ -240,11 +265,11 @@ impl ProxiedRedfishClientPoolImpl {
     }
 }
 
-#[async_trait]
-impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
-    #[tracing::instrument(name = "redfish_create_client", skip_all, fields(bmc_host = host))]
-    async fn create_client(
+impl ProxiedRedfishClientPoolImpl {
+    /// Preserve the ordinary client path while choosing its transport retry policy.
+    async fn create_client_with_pool(
         &self,
+        pool: &libredfish::RedfishClientPool,
         host: &str,
         port: Option<u16>,
         auth: RedfishAuth,
@@ -294,27 +319,52 @@ impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
             None => instrumented_redfish_initialization(
                 "create_client",
                 [],
-                self.pool
-                    .create_client_with_custom_headers(endpoint, custom_headers),
+                pool.create_client_with_custom_headers(endpoint, custom_headers),
             )
             .await
             .map_err(RedfishClientCreationError::RedfishError)?,
-            Some(RedfishVendor::Unknown) => self
-                .pool
+            Some(RedfishVendor::Unknown) => pool
                 .create_standard_client_with_custom_headers(endpoint, custom_headers)
                 .map_err(RedfishClientCreationError::RedfishError)
                 .map(|c| c as Box<dyn Redfish>)?,
             Some(vendor) => instrumented_redfish_initialization(
                 "create_client",
                 [],
-                self.pool
-                    .create_client_with_vendor(endpoint, vendor, custom_headers),
+                pool.create_client_with_vendor(endpoint, vendor, custom_headers),
             )
             .await
             .map_err(RedfishClientCreationError::RedfishError)?,
         };
 
         Ok(Box::new(InstrumentedRedfish::new(client, Vec::new())))
+    }
+}
+
+#[async_trait]
+impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
+    #[tracing::instrument(name = "redfish_create_client", skip_all, fields(bmc_host = host))]
+    async fn create_client(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        self.create_client_with_pool(&self.pool, host, port, auth, vendor)
+            .await
+    }
+
+    #[tracing::instrument(name = "redfish_create_client", skip_all, fields(bmc_host = host))]
+    async fn create_client_without_mutation_retries(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        let pool = self.pool.without_mutation_retries();
+        self.create_client_with_pool(&pool, host, port, auth, vendor)
+            .await
     }
 
     fn credential_reader(&self) -> &dyn CredentialReader {
