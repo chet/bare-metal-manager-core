@@ -34,7 +34,7 @@ pub async fn list(
             OsImage::db_aliased_table(),
         );
         sqlx::query_as(sqlx::AssertSqlSafe(query))
-            .bind(tenant_organization_id.to_string())
+            .bind(tenant_organization_id)
             .fetch_all(txn)
             .await
             .map_err(|e| DatabaseError::new("os_images All", e))
@@ -150,7 +150,7 @@ async fn persist(
             .bind(&value.attributes.description)
             .bind(&value.attributes.source_url)
             .bind(&value.attributes.digest)
-            .bind(value.attributes.tenant_organization_id.to_string())
+            .bind(&value.attributes.tenant_organization_id)
             .bind(&value.attributes.auth_type)
             .bind(&value.attributes.auth_token)
             .bind(&value.attributes.rootfs_id)

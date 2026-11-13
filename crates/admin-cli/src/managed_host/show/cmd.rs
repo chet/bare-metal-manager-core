@@ -139,7 +139,7 @@ fn build_row(src: ManagedHostOutputWrapper, headers: &[&str], widths: &ColumnWid
         row_data.extend_from_slice(&[
             value.host_gpu_count.to_string(),
             value.host_ib_ifs_count.to_string(),
-            value.host_memory.unwrap_or(UNKNOWN.to_owned()),
+            value.host_memory.unwrap_or_else(|| UNKNOWN.to_owned()),
             value.instance_type_id.unwrap_or_default(),
         ]);
     }
@@ -314,7 +314,7 @@ fn show_managed_host_details_view(m: carbide_rpc_utils::ManagedHostOutput) -> Ca
     writeln!(
         &mut lines,
         "Hostname    : {}",
-        m.hostname.unwrap_or(UNKNOWN.to_string())
+        m.hostname.as_deref().unwrap_or(UNKNOWN)
     )?;
 
     writeln!(&mut lines, "State       : {}", m.state)?;
@@ -371,14 +371,17 @@ fn show_managed_host_details_view(m: carbide_rpc_utils::ManagedHostOutput) -> Ca
         ),
         (
             "  Associated Instance Type",
-            Some(m.instance_type_id.unwrap_or("Unassociated".to_string())),
+            Some(
+                m.instance_type_id
+                    .unwrap_or_else(|| "Unassociated".to_string()),
+            ),
         ),
         (
             "  Quarantined",
             Some(
                 m.quarantine_state
                     .map(|q| format!("yes (reason: {})", q.reason.as_deref().unwrap_or("<none>")))
-                    .unwrap_or("no".to_string()),
+                    .unwrap_or_else(|| "no".to_string()),
             ),
         ),
     ];
@@ -432,7 +435,7 @@ deprecated and will be removed in a future release, see https://docs.nvidia.com/
                 &mut lines,
                 "{:<width$}: {}",
                 key,
-                value.unwrap_or(UNKNOWN.to_string())
+                value.as_deref().unwrap_or(UNKNOWN)
             )?;
         }
     }
@@ -477,7 +480,7 @@ deprecated and will be removed in a future release, see https://docs.nvidia.com/
                     &mut lines,
                     "{:<width$}: {}",
                     key,
-                    value.unwrap_or(UNKNOWN.to_string())
+                    value.as_deref().unwrap_or(UNKNOWN)
                 )?;
             }
         }

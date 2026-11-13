@@ -376,7 +376,10 @@ impl Serialize for TpmEkCertificate {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&BASE64_STANDARD.encode(self.as_bytes()))
+        serializer.collect_str(&base64::display::Base64Display::new(
+            self.as_bytes(),
+            &BASE64_STANDARD,
+        ))
     }
 }
 
@@ -385,13 +388,30 @@ impl<'de> Deserialize<'de> for TpmEkCertificate {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
+        struct StringVisitor;
 
-        let str_value = String::deserialize(deserializer)?;
-        let bytes = BASE64_STANDARD
-            .decode(str_value)
-            .map_err(|err| Error::custom(err.to_string()))?;
-        Ok(Self(bytes))
+        impl serde::de::Visitor<'_> for StringVisitor {
+            type Value = TpmEkCertificate;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                BASE64_STANDARD
+                    .decode(value)
+                    .map(TpmEkCertificate)
+                    .map_err(E::custom)
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
+        }
+
+        deserializer.deserialize_str(StringVisitor)
     }
 }
 

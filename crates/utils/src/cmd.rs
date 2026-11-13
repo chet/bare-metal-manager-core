@@ -42,26 +42,26 @@ impl CmdError {
         output: &std::process::Output,
     ) -> Self {
         let error_details = if output.stderr.is_empty() {
-            String::from_utf8_lossy(&output.stdout).to_string()
+            String::from_utf8_lossy(&output.stdout).into_owned()
         } else {
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&output.stderr).into_owned()
         };
 
         Self::Subprocess(
-            command.get_program().to_string_lossy().to_string(),
+            command.get_program().to_string_lossy().into_owned(),
             command
                 .get_args()
-                .map(|arg| arg.to_string_lossy().to_string())
+                .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<String>>(),
             error_details,
         )
     }
     pub fn output_parse_error(command: &Command) -> Self {
         Self::OutputParse(
-            command.get_program().to_string_lossy().to_string(),
+            command.get_program().to_string_lossy().into_owned(),
             command
                 .get_args()
-                .map(|arg| arg.to_string_lossy().to_string())
+                .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<String>>(),
         )
     }
@@ -102,9 +102,10 @@ impl Cmd {
         self
     }
 
-    pub fn env<S>(mut self, key: S, value: S) -> Self
+    pub fn env<K, V>(mut self, key: K, value: V) -> Self
     where
-        S: AsRef<OsStr>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
     {
         self.command.env(key, value);
         self
@@ -150,15 +151,14 @@ impl Cmd {
     }
 
     fn pretty_cmd(&self) -> String {
-        format!(
-            "{} {}",
-            self.command.get_program().to_string_lossy(),
-            self.command
-                .get_args()
-                .map(|x| x.to_string_lossy())
-                .collect::<Vec<std::borrow::Cow<'_, str>>>()
-                .join(" ")
-        )
+        let mut output = format!("{} ", self.command.get_program().to_string_lossy());
+        for (index, argument) in self.command.get_args().enumerate() {
+            if index != 0 {
+                output.push(' ');
+            }
+            output.push_str(&argument.to_string_lossy());
+        }
+        output
     }
 }
 
@@ -188,9 +188,10 @@ impl TokioCmd {
         self
     }
 
-    pub fn env<S>(mut self, key: S, value: S) -> Self
+    pub fn env<K, V>(mut self, key: K, value: V) -> Self
     where
-        S: AsRef<OsStr>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
     {
         self.command.env(key, value);
         self
@@ -286,13 +287,13 @@ impl TokioCmd {
 
     fn pretty_cmd(&self) -> String {
         let c = self.command.as_std();
-        format!(
-            "{} {}",
-            c.get_program().to_string_lossy(),
-            c.get_args()
-                .map(|x| x.to_string_lossy())
-                .collect::<Vec<std::borrow::Cow<'_, str>>>()
-                .join(" ")
-        )
+        let mut output = format!("{} ", c.get_program().to_string_lossy());
+        for (index, argument) in c.get_args().enumerate() {
+            if index != 0 {
+                output.push(' ');
+            }
+            output.push_str(&argument.to_string_lossy());
+        }
+        output
     }
 }

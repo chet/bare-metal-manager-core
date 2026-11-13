@@ -1066,7 +1066,8 @@ async fn test_ib_port_down_sets_prevent_allocations_alert(
     assert!(
         alert
             .classifications
-            .contains(&"PreventAllocations".to_string()),
+            .iter()
+            .any(|classification| classification == "PreventAllocations"),
         "IbPortDown alert should have PreventAllocations classification"
     );
 

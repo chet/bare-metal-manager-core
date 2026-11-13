@@ -55,11 +55,11 @@ pub(crate) async fn trigger_machine_attestation(
     }
 
     let request_payload = request.get_ref();
-    let machine_id = request_payload
-        .machine_id
-        .ok_or(Status::from(CarbideError::Internal {
+    let machine_id = request_payload.machine_id.ok_or_else(|| {
+        Status::from(CarbideError::Internal {
             message: "No machine id supplied".to_string(),
-        }))?;
+        })
+    })?;
     let redfish_timeout_duration =
         std::time::Duration::from_secs(request_payload.redfish_timeout_secs as u64);
 

@@ -247,10 +247,27 @@ impl<'a> serde::Deserialize<'a> for Timestamp {
     where
         D: serde::Deserializer<'a>,
     {
-        let s = String::deserialize(deserializer)?;
-        let dt =
-            DateTime::<Utc>::from_str(&s).unwrap_or_else(|_e| DateTime::<chrono::Utc>::default());
-        Ok(dt.into())
+        struct StringVisitor;
+
+        impl serde::de::Visitor<'_> for StringVisitor {
+            type Value = Timestamp;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Timestamp, E> {
+                Ok(DateTime::<Utc>::from_str(value).unwrap_or_default().into())
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Timestamp, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
+        }
+
+        deserializer.deserialize_str(StringVisitor)
     }
 }
 

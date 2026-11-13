@@ -1008,7 +1008,7 @@ pub(super) async fn update_nvue(
             let path = FPath(startup_path);
             path.cleanup();
             let file_changed = write(next_contents, &path, "NVUE", MAX_EXPECTED_SIZE, force)
-                .wrap_err(format!("NVUE config at {path}"))?;
+                .wrap_err_with(|| format!("NVUE config at {path}"))?;
 
             if !skip_post {
                 // The agent can restart after saving the file but before
@@ -2299,7 +2299,7 @@ async fn tenant_vf_mac(vlan_fdb: &[Fdb]) -> eyre::Result<&str> {
     let cmd_res = timeout(Duration::from_secs(5), cmd.output())
         .await
         .wrap_err_with(|| format!("timeout calling {cmd_str}"))?;
-    let ip_out = cmd_res.wrap_err(cmd_str.to_string())?;
+    let ip_out = cmd_res.wrap_err_with(|| cmd_str.clone())?;
 
     if !ip_out.status.success() {
         tracing::debug!(
@@ -2314,7 +2314,7 @@ async fn tenant_vf_mac(vlan_fdb: &[Fdb]) -> eyre::Result<&str> {
         ));
     }
 
-    let ip_json = String::from_utf8_lossy(&ip_out.stdout).to_string();
+    let ip_json = String::from_utf8_lossy(&ip_out.stdout);
     let ip_show: Vec<IpShow> = serde_json::from_str(&ip_json)?;
     if ip_show.len() != 1 {
         eyre::bail!("getting local side MAC should return 1 entry, got {ip_show:?}");
@@ -2367,7 +2367,7 @@ fn hostname() -> eyre::Result<Hostname> {
         .split('.')
         .next()
         .map(|s| s.to_owned())
-        .ok_or(eyre::eyre!("empty hostname?"))?;
+        .ok_or_else(|| eyre::eyre!("empty hostname?"))?;
     let search_domain = fqdn.split('.').skip(1).collect::<Vec<&str>>().join(".");
     Ok(Hostname {
         hostname,
@@ -7001,7 +7001,7 @@ esac
                 let mut f = fs::File::create(ERR_FILE).unwrap();
                 f.write_all(startup_yaml.as_bytes()).unwrap();
             })
-            .wrap_err(format!("YAML parser error. output written to {ERR_FILE}"))?;
+            .wrap_err_with(|| format!("YAML parser error. output written to {ERR_FILE}"))?;
 
         Ok(())
     }
@@ -7061,7 +7061,7 @@ esac
                 let mut f = fs::File::create(ERR_FILE).unwrap();
                 f.write_all(startup_yaml.as_bytes()).unwrap();
             })
-            .wrap_err(format!("YAML parser error. output written to {ERR_FILE}"))?;
+            .wrap_err_with(|| format!("YAML parser error. output written to {ERR_FILE}"))?;
 
         Ok(())
     }
@@ -7130,7 +7130,7 @@ esac
                 let mut f = fs::File::create(ERR_FILE).unwrap();
                 f.write_all(startup_yaml.as_bytes()).unwrap();
             })
-            .wrap_err(format!("YAML parser error. output written to {ERR_FILE}"))?;
+            .wrap_err_with(|| format!("YAML parser error. output written to {ERR_FILE}"))?;
 
         Ok(())
     }
@@ -7186,7 +7186,7 @@ esac
                 let mut f = fs::File::create(ERR_FILE).unwrap();
                 f.write_all(startup_yaml.as_bytes()).unwrap();
             })
-            .wrap_err(format!("YAML parser error. output written to {ERR_FILE}"))?;
+            .wrap_err_with(|| format!("YAML parser error. output written to {ERR_FILE}"))?;
 
         Ok(())
     }
@@ -7745,7 +7745,7 @@ esac
         // check dhcp server
         let dhcp_path = hbn_root.join("etc/supervisor/conf.d/default-forge-dhcp-server.conf");
         let dhcp_contents = super::read_limited(&dhcp_path, MAX_DHCP_ACL_SIZE)
-            .wrap_err(format!("failed reading {dhcp_path:?}"))?;
+            .wrap_err_with(|| format!("failed reading {dhcp_path:?}"))?;
         assert_eq!(dhcp_contents, crate::dhcp::TMPL_EMPTY);
         Ok(())
     }
@@ -8898,7 +8898,7 @@ esac
                 service_interfaces: vec![],
                 service_vpc_slot_inventory: None,
                 use_admin_network,
-                admin_interface: use_admin_network.then_some(iface.clone()),
+                admin_interface: use_admin_network.then(|| iface.clone()),
                 tenant_interfaces: (!use_admin_network)
                     .then_some(vec![iface])
                     .unwrap_or_default(),

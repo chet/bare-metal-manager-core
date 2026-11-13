@@ -463,18 +463,14 @@ fn component_failure_detail(result: Option<&rpc::forge::ComponentResult>) -> Str
 
 pub(super) fn component_result_fields(
     result: Option<&rpc::forge::ComponentResult>,
-) -> (String, String, String) {
+) -> (&str, &str, &str) {
     match result {
         Some(result) => (
             display_or_dash(component_result_identifier(result)),
-            component_result_status_name(result.status).to_string(),
+            component_result_status_name(result.status),
             display_or_dash(&result.error),
         ),
-        None => (
-            "-".to_string(),
-            "missing-result".to_string(),
-            "-".to_string(),
-        ),
+        None => ("-", "missing-result", "-"),
     }
 }
 
@@ -517,12 +513,8 @@ pub(crate) fn timestamp_json(timestamp: Option<&rpc::Timestamp>) -> serde_json::
     }
 }
 
-pub(super) fn display_or_dash(value: &str) -> String {
-    if value.is_empty() {
-        "-".to_string()
-    } else {
-        value.to_string()
-    }
+pub(super) fn display_or_dash(value: &str) -> &str {
+    if value.is_empty() { "-" } else { value }
 }
 
 /// The identifier to display for a component result: the component ID for an

@@ -21,7 +21,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use colored::Colorize;
+use colored::{ColoredString, Colorize};
 use tokio::task::JoinHandle;
 
 use super::terminal::{width, wrap};
@@ -132,14 +132,18 @@ impl ActivityState {
         let mut lines = self.step_lines(width()).into_iter();
         let mut frame = format!(
             "  {} {:<CHECK_WIDTH$} {:>7}  {}",
-            FRAMES[self.frame].to_string().cyan(),
+            ColoredString::from(FRAMES[self.frame].to_string()).cyan(),
             first.id,
-            seconds(first.started.elapsed()).dimmed(),
-            lines.next().unwrap_or_default().dimmed()
+            ColoredString::from(seconds(first.started.elapsed())).dimmed(),
+            ColoredString::from(lines.next().unwrap_or_default()).dimmed()
         );
         let mut rows = 1;
         for line in lines {
-            frame.push_str(&format!("\n{:DETAIL_COLUMN$}{}", "", line.dimmed()));
+            frame.push_str(&format!(
+                "\n{:DETAIL_COLUMN$}{}",
+                "",
+                ColoredString::from(line).dimmed()
+            ));
             rows += 1;
         }
         self.clear();

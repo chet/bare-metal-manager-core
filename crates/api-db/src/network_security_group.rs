@@ -66,7 +66,7 @@ pub async fn create(
 
     match sqlx::query_as::<Postgres, NetworkSecurityGroup>(query)
         .bind(id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(&metadata.name)
         .bind(sqlx::types::Json(&metadata.labels))
         .bind(&metadata.description)
@@ -113,7 +113,7 @@ pub async fn find_ids(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     if for_update {
@@ -155,7 +155,7 @@ pub async fn find_by_ids(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     if for_update {
@@ -210,7 +210,7 @@ pub async fn find_objects_with_attachments(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND nsg.tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     builder.push(" GROUP BY nsg.id ");
@@ -336,7 +336,7 @@ pub async fn get_propagation_status(
 
     if tenant_organization_id.is_some() {
         vpc_query_builder.push(" AND nsg.tenant_organization_id = ");
-        vpc_query_builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        vpc_query_builder.push_bind(tenant_organization_id);
     }
 
     vpc_query_builder.push(" GROUP BY v.id, i.id) as prop_stats GROUP BY vpc_id");
@@ -398,7 +398,7 @@ pub async fn get_propagation_status(
 
     if tenant_organization_id.is_some() {
         instance_query_builder.push(" AND nsg.tenant_organization_id = ");
-        instance_query_builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        instance_query_builder.push_bind(tenant_organization_id);
     }
 
     instance_query_builder.push(
@@ -485,7 +485,7 @@ pub async fn update(
         .bind(updated_by)
         .bind(id)
         .bind(expected_version)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(stateful_egress)
         .fetch_one(txn)
         .await
@@ -525,7 +525,7 @@ pub async fn soft_delete(
 
     match sqlx::query_as(query)
         .bind(network_security_group_id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .fetch_one(txn)
         .await
     {

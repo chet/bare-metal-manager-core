@@ -85,7 +85,7 @@ pub(crate) fn restart_host_for_lockdown(
         let action = ResetType::ForceRestart;
         let requested_at = Utc::now();
         tracing::info!(
-            machine_id = machine.id.to_string(),
+            machine_id = %machine.id,
             ?action,
             trigger_location = %trigger_location,
             "Host Power Control"
@@ -121,7 +121,7 @@ pub async fn host_power_control_with_location(
     };
     // Always log to ensure we can see that carbide is doing the power controlling
     tracing::info!(
-        machine_id = machine.id.to_string(),
+        machine_id = %machine.id,
         ?action,
         trigger_location = %trigger_location,
         "Host Power Control"
@@ -144,14 +144,14 @@ pub async fn host_power_control_with_location(
     if (action == ResetType::GracefulRestart) || (action == ResetType::ForceRestart) {
         let power_state = power.state().await?;
         tracing::info!(
-            machine_id = machine.id.to_string(),
+            machine_id = %machine.id,
             ?power_state,
             "Host Power State"
         );
         if power_state == Some(PowerState::Off) {
             tracing::info!(
-                machine_id = machine.id.to_string(),
-                action = "Manual intervention required to initiate power-on".to_string(),
+                machine_id = %machine.id,
+                action = "Manual intervention required to initiate power-on",
                 "Host Power Action"
             );
             return Ok(());
@@ -162,7 +162,7 @@ pub async fn host_power_control_with_location(
         let power_state = power.state().await?;
         if power_state != Some(PowerState::Off) {
             tracing::warn!(
-                machine_id = machine.id.to_string(),
+                machine_id = %machine.id,
                 ?power_state,
                 "ACPowercycle requires chassis to be Off, forcing off first"
             );
@@ -173,7 +173,7 @@ pub async fn host_power_control_with_location(
             // AC power cycle support: the host stays off.
             Err(PlatformError::Unsupported) => {
                 tracing::warn!(
-                    machine_id = machine.id.to_string(),
+                    machine_id = %machine.id,
                     "ACPowercycle is not supported, leaving host powered off"
                 );
                 ctx.pending_db_writes

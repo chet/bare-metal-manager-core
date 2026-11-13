@@ -196,7 +196,7 @@ pub(super) fn health_alerts_fmt(
         }
 
         result += r#"<span class="bubble error">"#;
-        askama_escape::Html.write_escaped(&mut result, &alert.id.to_string())?;
+        askama_escape::Html.write_escaped(&mut result, alert.id.as_str())?;
         if include_target && let Some(target) = alert.target.as_ref() {
             result += " [Target: ";
             askama_escape::Html.write_escaped(&mut result, target)?;
@@ -251,7 +251,7 @@ where
             result += "<br>";
         }
         result += r#"<div class="health_alert_classification">"#;
-        askama_escape::Html.write_escaped(&mut result, &classification.to_string())?;
+        askama_escape::Html.write_escaped(&mut result, classification.as_str())?;
         result += r#"</div>"#;
     }
 

@@ -204,7 +204,7 @@ impl ConsoleLogger {
         {
             Ok(file) => file,
             Err(error) => {
-                tracing::error!(path = self.log_path.display().to_string(), machine_id=%self.machine_id, %error, "could not open log file for writing");
+                tracing::error!(path = %self.log_path.display(), machine_id=%self.machine_id, %error, "could not open log file for writing");
                 self.fail(error);
                 return;
             }

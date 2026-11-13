@@ -74,14 +74,14 @@ pub(crate) async fn set(
         Some(machine_id) => {
             crate::api::log_machine_id(&machine_id);
             tracing::warn!(
-                machine_interface_id = mbo.machine_interface_id.to_string(),
-                machine_id = machine_id.to_string(),
+                machine_interface_id = %mbo.machine_interface_id,
+                machine_id = %machine_id,
                 "Boot override for machine_interface_id is active. Bypassing regular boot"
             );
         }
 
         None => tracing::warn!(
-            machine_interface_id = mbo.machine_interface_id.to_string(),
+            machine_interface_id = %mbo.machine_interface_id,
             "Boot override for machine_interface_id is active. Bypassing regular boot"
         ),
     }
@@ -111,14 +111,14 @@ pub(crate) async fn clear(
         Some(machine_id) => {
             crate::api::log_machine_id(&machine_id);
             tracing::info!(
-                machine_interface_id = machine_interface_id.to_string(),
-                machine_id = machine_id.to_string(),
+                machine_interface_id = %machine_interface_id,
+                machine_id = %machine_id,
                 "Boot override for machine_interface_id disabled."
             );
         }
 
         None => tracing::info!(
-            machine_interface_id = machine_interface_id.to_string(),
+            machine_interface_id = %machine_interface_id,
             "Boot override for machine_interface_id disabled"
         ),
     }

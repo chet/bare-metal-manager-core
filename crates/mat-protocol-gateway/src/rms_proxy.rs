@@ -520,15 +520,19 @@ impl fmt::Display for Unroutable {
                 formatter,
                 "machine-a-tron {source} owns rack {rack_id:?} but has not answered its status polls for ownership.stale_after; retry once it answers"
             ),
-            Self::Ambiguous { sources, rack_id } => write!(
-                formatter,
-                "rack {rack_id:?} is reported by machine-a-tron instances {}",
-                sources
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" and ")
-            ),
+            Self::Ambiguous { sources, rack_id } => {
+                write!(
+                    formatter,
+                    "rack {rack_id:?} is reported by machine-a-tron instances "
+                )?;
+                for (index, source) in sources.iter().enumerate() {
+                    if index != 0 {
+                        formatter.write_str(" and ")?;
+                    }
+                    write!(formatter, "{source}")?;
+                }
+                Ok(())
+            }
             Self::Unknown { rack_id } => {
                 write!(
                     formatter,

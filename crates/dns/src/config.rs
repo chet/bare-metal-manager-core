@@ -175,7 +175,7 @@ fn serialize_uri<S>(uri: &http::Uri, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    serializer.serialize_str(&format!("{uri}"))
+    serializer.collect_str(uri)
 }
 
 fn deserialize_uri<'de, D>(deserializer: D) -> Result<http::Uri, D::Error>
@@ -239,11 +239,11 @@ impl Config {
 
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let cfg = std::fs::read_to_string(path).map_err(|error| ConfigError::CouldNotRead {
-            path: path.to_string_lossy().to_string(),
+            path: path.to_string_lossy().into_owned(),
             error,
         })?;
         toml::from_str::<Self>(&cfg).map_err(|error| ConfigError::InvalidToml {
-            path: path.to_string_lossy().to_string(),
+            path: path.to_string_lossy().into_owned(),
             error,
         })
     }

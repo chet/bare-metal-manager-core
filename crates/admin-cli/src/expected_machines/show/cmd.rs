@@ -96,7 +96,7 @@ pub(super) async fn show_expected_machines(
                     x.bmc_ip,
                     x.machine_id
                         .map(|x| x.to_string())
-                        .unwrap_or("Unlinked".to_string()),
+                        .unwrap_or_else(|| "Unlinked".to_string()),
                 )
             }),
     );
@@ -177,7 +177,7 @@ async fn convert_and_print_into_nice_table(
             expected_machine.bmc_mac_address,
             machine_interface
                 .map(|x| x.address.join("\n"))
-                .unwrap_or("Undiscovered".to_string()),
+                .unwrap_or_else(|| "Undiscovered".to_string()),
             expected_machine.fallback_dpu_serial_numbers.join("\n"),
             machine_id.unwrap_or("Unlinked"),
             expected_machine

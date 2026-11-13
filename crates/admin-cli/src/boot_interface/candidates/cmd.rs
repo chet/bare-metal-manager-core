@@ -172,9 +172,9 @@ impl From<forgerpc::GetMachineBootInterfacesResponse> for CandidatesReport {
                 })
             })
             .collect();
-        let explored_macs: Vec<String> = explored_defaults
+        let explored_macs: Vec<&str> = explored_defaults
             .iter()
-            .map(|d| d.mac_address.clone())
+            .map(|d| d.mac_address.as_str())
             .collect();
 
         let mark = |mac: &str, pick: &Option<String>| pick.as_deref() == Some(mac);
@@ -198,7 +198,7 @@ impl From<forgerpc::GetMachineBootInterfacesResponse> for CandidatesReport {
                 eligible: is_eligible(i.primary_interface, i.network_segment_type.as_deref()),
                 current: mark(&i.mac_address, &current_mac),
                 default: mark(&i.mac_address, &default_mac),
-                explored_default: explored_macs.contains(&i.mac_address),
+                explored_default: explored_macs.contains(&i.mac_address.as_str()),
             })
             .collect();
         candidates.extend(r.predicted_interfaces.iter().map(|p| CandidateRow {
@@ -211,7 +211,7 @@ impl From<forgerpc::GetMachineBootInterfacesResponse> for CandidatesReport {
             eligible: is_eligible(p.primary_interface, p.network_segment_type.as_deref()),
             current: mark(&p.mac_address, &current_mac),
             default: mark(&p.mac_address, &default_mac),
-            explored_default: explored_macs.contains(&p.mac_address),
+            explored_default: explored_macs.contains(&p.mac_address.as_str()),
         }));
 
         CandidatesReport {
@@ -259,7 +259,6 @@ pub(super) async fn handle_candidates(
 /// One row per candidate NIC, then a summary block naming each pick.
 fn render_candidates(report: &CandidatesReport) -> String {
     let mut out = String::new();
-    let dash = |s: &Option<String>| s.as_deref().unwrap_or("-").to_string();
     let summary_width = SUMMARY_LABEL_WIDTH;
 
     let machine_id = report
@@ -315,11 +314,11 @@ fn render_candidates(report: &CandidatesReport) -> String {
             };
             table.add_row(Row::new(vec![
                 Cell::new(&c.mac_address),
-                Cell::new(&dash(&c.interface_id)),
-                Cell::new(&dash(&c.boot_interface_id)),
-                Cell::new(&dash(&c.network_segment_type)),
+                Cell::new(c.interface_id.as_deref().unwrap_or("-")),
+                Cell::new(c.boot_interface_id.as_deref().unwrap_or("-")),
+                Cell::new(c.network_segment_type.as_deref().unwrap_or("-")),
                 Cell::new(source),
-                Cell::new(&c.primary_interface.to_string()),
+                Cell::new(if c.primary_interface { "true" } else { "false" }),
                 Cell::new(eligible),
                 Cell::new(&markers),
             ]));
@@ -426,13 +425,16 @@ fn render_candidates(report: &CandidatesReport) -> String {
         out,
         "{:<summary_width$} {}",
         "Desired selection source:",
-        dash(&report.desired_selection_source),
+        report.desired_selection_source.as_deref().unwrap_or("-"),
     );
     let _ = writeln!(
         out,
         "{:<summary_width$} {}",
         "Selection updated at:",
-        dash(&report.desired_selection_updated_at),
+        report
+            .desired_selection_updated_at
+            .as_deref()
+            .unwrap_or("-"),
     );
 
     out

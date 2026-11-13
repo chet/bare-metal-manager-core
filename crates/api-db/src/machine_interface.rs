@@ -990,11 +990,7 @@ async fn find_or_create_machine_interface_inner(
         is_primary,
         retained_window,
     } = options;
-    let relaystr = relays
-        .iter()
-        .map(|v| v.to_string())
-        .collect::<Vec<String>>()
-        .join(", ");
+    let relaystr = relays.iter().join(", ");
     match machine_id {
         None => {
             tracing::info!(
@@ -1057,11 +1053,7 @@ pub async fn find_or_create_observed_machine_interface(
         .as_ref()
         .and_then(|interface| interface.role.primary_interface_override());
     let interface_type = expected_interface_type.unwrap_or(InterfaceType::Data);
-    let relaystr = relays
-        .iter()
-        .map(|v| v.to_string())
-        .collect::<Vec<String>>()
-        .join(", ");
+    let relaystr = relays.iter().join(", ");
     match machine_id {
         None => {
             tracing::info!(
@@ -1469,10 +1461,8 @@ async fn validate_existing_mac_and_create_inner(
                 }
 
                 if let Some(address_family) = address_family {
-                    let candidate_segment_ids = network_segments
-                        .iter()
-                        .map(|segment| segment.id.to_string())
-                        .join(", ");
+                    let candidate_segment_ids =
+                        network_segments.iter().map(|segment| segment.id).join(", ");
 
                     // Reuse the existing dynamic create path unchanged: each
                     // candidate snapshot now exposes only the requested family,
@@ -2250,11 +2240,9 @@ async fn create_dynamic(
         }
     }
 
-    let segment_list = segments
-        .iter()
-        .map(|segment| format!("`{}` ({})", segment.config.name, segment.id))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let segment_list = segments.iter().format_with(", ", |segment, f| {
+        f(&format_args!("`{}` ({})", segment.config.name, segment.id))
+    });
 
     Err(DatabaseError::internal(format!(
         "ownership or hostname retries exhausted while allocating machine interface addresses from segments {segment_list}"
@@ -2290,7 +2278,7 @@ async fn create_static_path(
                 .or_else(|| segments.iter().find(|s| s.config.name == crate::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME))
                 .ok_or_else(|| DatabaseError::internal(format!(
                     "unable to find network segment that contains requested IP {address} in network segments: {}",
-                    segments.iter().map(|s| s.id.to_string()).join(", "),
+                    segments.iter().map(|s| s.id).join(", "),
                 ))
     )?;
 
@@ -2425,14 +2413,10 @@ async fn create_inner(
 ) -> DatabaseResult<MachineInterfaceId> {
     // Allocation must have produced at least one address for the new interface.
     if allocated_addresses.is_empty() {
-        let prefixes: Vec<_> = segment
-            .prefixes
-            .iter()
-            .map(|p| p.prefix.to_string())
-            .collect();
+        let prefixes = segment.prefixes.iter().map(|p| p.prefix).join(", ");
         return Err(crate::DatabaseError::ResourceExhausted(format!(
             "No IP addresses left in network segment (prefixes: {})",
-            prefixes.join(", ")
+            prefixes
         )));
     }
     // A brand-new interface has no stored name yet, so the configured strategy
@@ -4487,11 +4471,7 @@ async fn reconcile_interface_segment_candidates(
             "Network segment mismatch for existing MAC address: {} stored segment: {} discovery candidates: {}",
             existing_interface.mac_address,
             existing_interface.segment_id,
-            authoritative_segment_ids
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<String>>()
-                .join(", "),
+            authoritative_segment_ids.iter().join(", "),
         )));
     }
 

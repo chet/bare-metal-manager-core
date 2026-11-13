@@ -275,9 +275,14 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                     uefi_device_path: Some(
                         dpu.override_hosts_uefi_device_path.clone().unwrap_or(
                             UefiDevicePath::from_str(&format!(
-                                "PciRoot(0x8)/Pci(0x2,0xa)/Pci(0x0,0x{:x})/MAC({},0x1)",
+                                "PciRoot(0x8)/Pci(0x2,0xa)/Pci(0x0,0x{:x})/MAC({:02X}{:02X}{:02X}{:02X}{:02X}{:02X},0x1)",
                                 index + 1,
-                                dpu.host_mac_address.to_string().replace(':', ""),
+                                dpu.host_mac_address.bytes()[0],
+                                dpu.host_mac_address.bytes()[1],
+                                dpu.host_mac_address.bytes()[2],
+                                dpu.host_mac_address.bytes()[3],
+                                dpu.host_mac_address.bytes()[4],
+                                dpu.host_mac_address.bytes()[5],
                             ))
                             .unwrap(),
                         ),

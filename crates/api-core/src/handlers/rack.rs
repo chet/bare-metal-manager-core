@@ -38,6 +38,7 @@ use db::{
 };
 use futures_util::FutureExt;
 use health_report::HealthReportApplyMode;
+use itertools::Itertools;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::metadata::Metadata;
 use model::rack::{MaintenanceActivity, MaintenanceScope, RackState};
@@ -858,11 +859,7 @@ pub(crate) async fn on_demand_rack_maintenance(
             if !foreign.is_empty() {
                 return Err(CarbideError::InvalidArgument(format!(
                     "machine(s) [{}] do not belong to rack {rack_id}",
-                    foreign
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    foreign.iter().format(", "),
                 ))
                 .into());
             }
@@ -889,11 +886,7 @@ pub(crate) async fn on_demand_rack_maintenance(
             if !foreign.is_empty() {
                 return Err(CarbideError::InvalidArgument(format!(
                     "switch(es) [{}] do not belong to rack {rack_id}",
-                    foreign
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    foreign.iter().format(", "),
                 ))
                 .into());
             }
@@ -920,11 +913,7 @@ pub(crate) async fn on_demand_rack_maintenance(
             if !foreign.is_empty() {
                 return Err(CarbideError::InvalidArgument(format!(
                     "power shelf/shelves [{}] do not belong to rack {rack_id}",
-                    foreign
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    foreign.iter().format(", "),
                 ))
                 .into());
             }

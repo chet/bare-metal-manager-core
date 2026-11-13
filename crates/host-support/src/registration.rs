@@ -326,16 +326,16 @@ pub async fn write_certs(
         };
         tokio::fs::write(client_cert, combined_cert)
             .await
-            .wrap_err(format!(
-                "failed to write new machine certificate PEM to {client_cert}"
-            ))?;
+            .wrap_err_with(|| {
+                format!("failed to write new machine certificate PEM to {client_cert}")
+            })?;
         tracing::info!(%client_cert, "Wrote new machine certificate PEM");
 
         write_private_key(client_key, machine_certificate.private_key.as_slice())
             .await
-            .wrap_err(format!(
-                "failed to write new machine certificate key to: {client_key}"
-            ))?;
+            .wrap_err_with(|| {
+                format!("failed to write new machine certificate key to: {client_key}")
+            })?;
     } else {
         return Err(eyre::eyre!("write_certs: machine_certificate is empty"));
     }

@@ -193,7 +193,7 @@ pub(crate) async fn get_configuration(
         None => {
             return Err(CarbideError::NotFoundError {
                 kind: "tenant_identity_config",
-                id: org_id_str.clone(),
+                id: org_id_str,
             }
             .into());
         }
@@ -238,7 +238,6 @@ pub(crate) async fn delete_configuration(
     let org_id: TenantOrganizationId = org_id
         .parse()
         .map_err(|e: InvalidTenantOrg| CarbideError::InvalidArgument(e.to_string()))?;
-    let org_id_str = org_id.as_str().to_string();
 
     let deleted = api
         .database_connection
@@ -256,7 +255,7 @@ pub(crate) async fn delete_configuration(
     if !deleted {
         return Err(CarbideError::NotFoundError {
             kind: "tenant_identity_config",
-            id: org_id_str,
+            id: req.organization_id.trim().to_string(),
         }
         .into());
     }
@@ -409,7 +408,6 @@ pub(crate) async fn get_token_delegation(
     let org_id: TenantOrganizationId = org_id
         .parse()
         .map_err(|e: InvalidTenantOrg| CarbideError::InvalidArgument(e.to_string()))?;
-    let org_id_str = org_id.as_str().to_string();
 
     let cfg = api
         .database_connection
@@ -423,7 +421,7 @@ pub(crate) async fn get_token_delegation(
         None => {
             return Err(CarbideError::NotFoundError {
                 kind: "tenant_identity_config",
-                id: org_id_str.clone(),
+                id: req.organization_id.trim().to_string(),
             }
             .into());
         }
@@ -432,7 +430,7 @@ pub(crate) async fn get_token_delegation(
     if cfg.token_endpoint.is_none() || cfg.auth_method.is_none() {
         return Err(Status::from(CarbideError::NotFoundError {
             kind: "token_delegation",
-            id: org_id_str.clone(),
+            id: req.organization_id.trim().to_string(),
         }));
     }
 

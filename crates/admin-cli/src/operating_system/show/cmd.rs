@@ -125,7 +125,7 @@ async fn list_all(
             Cell::new(
                 &os.ipxe_template_id
                     .map(|id| id.to_string())
-                    .unwrap_or("-".to_string()),
+                    .unwrap_or_else(|| "-".to_string()),
             ),
             Cell::new(&params_str),
             Cell::new(&artifacts_str),
@@ -173,12 +173,10 @@ async fn show_one(
         "Org:                 {}",
         os.tenant_organization_id.as_deref().unwrap_or_default()
     );
-    println!(
-        "Type:                {}",
-        OperatingSystemType::try_from(os.r#type)
-            .map(|t| t.as_str_name().to_string())
-            .unwrap_or_else(|_| os.r#type.to_string())
-    );
+    match OperatingSystemType::try_from(os.r#type) {
+        Ok(os_type) => println!("Type:                {}", os_type.as_str_name()),
+        Err(_) => println!("Type:                {}", os.r#type),
+    }
     println!("Status:              {}", os.status);
     println!("Active:              {}", os.is_active);
     println!("Allow Override:      {}", os.allow_override);

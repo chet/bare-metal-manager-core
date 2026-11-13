@@ -167,6 +167,7 @@ pub(super) async fn get_astra_config(
 
                 // From the instance spxconfig, find the spx_attachments that match the dpa_interface.mac_address
                 // If we do not find a match, just continue and process other DPA interface objects.
+                let mac_address = dpa_interface.mac_address.to_string();
                 let Some(spx_attachment) =
                     instance
                         .config
@@ -174,7 +175,7 @@ pub(super) async fn get_astra_config(
                         .spx_attachments
                         .iter()
                         .find(|attachment| {
-                            attachment.mac_address == Some(dpa_interface.mac_address.to_string())
+                            attachment.mac_address.as_deref() == Some(mac_address.as_str())
                         })
                 else {
                     tracing::info!(
@@ -291,7 +292,7 @@ pub(super) async fn process_astra_config_status(
     // Get the machine snapshot given the dpu_machine_id
     let snapshot = db::managed_host::load_snapshot(&mut txn, dpu_machine_id, Default::default())
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: dpu_machine_id.to_string(),
         })?;
@@ -431,7 +432,7 @@ pub(super) async fn process_astra_config_status(
     let machine =
         db::machine::find_one(txn.as_mut(), &snapshot.host_snapshot.id, Default::default())
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: snapshot.host_snapshot.id.to_string(),
             })?;

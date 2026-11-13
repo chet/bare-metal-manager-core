@@ -85,15 +85,13 @@ impl<'de> Deserialize<'de> for RequestPattern {
 impl Display for RequestPattern {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if !self.verbs.is_empty() {
-            write!(
-                f,
-                "{} ",
-                self.verbs
-                    .iter()
-                    .map(|v| v.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )?;
+            for (index, verb) in self.verbs.iter().enumerate() {
+                if index != 0 {
+                    f.write_str(",")?;
+                }
+                write!(f, "{verb}")?;
+            }
+            f.write_str(" ")?;
         }
 
         for component in &self.path.components {

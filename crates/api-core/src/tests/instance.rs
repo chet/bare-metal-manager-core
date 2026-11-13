@@ -13175,7 +13175,7 @@ async fn test_factory_reset_bmc_on_release_sanitizes_host_bmc(
             let mut txn = env.pool.begin().await.unwrap();
             sqlx::query("UPDATE machines SET controller_state_version=$1 WHERE id=$2")
                 .bind(aged_version)
-                .bind(machine.id.to_string())
+                .bind(machine.id)
                 .execute(txn.as_mut())
                 .await
                 .unwrap();

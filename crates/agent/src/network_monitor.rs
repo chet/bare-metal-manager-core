@@ -357,8 +357,9 @@ impl NetworkMonitor {
         // Get this DPU information and list of peer DPU information
         let mut dpu_info: Option<DpuInfo> = None;
         let mut peer_dpus: Vec<DpuInfo> = Vec::new();
+        let dpu_machine_id = dpu_machine_id.to_string();
         for dpu in dpu_info_list.dpu_list {
-            if dpu.id == dpu_machine_id.to_string() {
+            if dpu.id == dpu_machine_id {
                 dpu_info = Some(dpu.clone().try_into().inspect_err(|_| {
                     self.record_error_metrics(NetworkMonitorError::DpuNotFound, None);
                 })?);
