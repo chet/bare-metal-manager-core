@@ -1948,7 +1948,7 @@ func TestInterfaceSQLDAO_Update(t *testing.T) {
 					assert.Equal(t, *tc.expectedDeviceInstance, *got.DeviceInstance)
 				}
 
-				if got.Updated.String() == ifc.Updated.String() {
+				if got.Updated.Equal(ifc.Updated) {
 					t.Errorf("got.Updated = %v, want different value", got.Updated)
 				}
 			}

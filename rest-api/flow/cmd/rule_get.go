@@ -78,7 +78,7 @@ func runRuleGet(cmd *cobra.Command, args []string) error {
 	var prettyJSON map[string]interface{}
 	if err := json.Unmarshal([]byte(rule.RuleDefinitionJSON), &prettyJSON); err == nil {
 		formatted, _ := json.MarshalIndent(prettyJSON, "", "  ")
-		fmt.Println(string(formatted))
+		fmt.Printf("%s\n", formatted)
 	} else {
 		fmt.Println(rule.RuleDefinitionJSON)
 	}

@@ -1526,7 +1526,7 @@ func TestOperatingSystemSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedDeactivationNote, *got.DeactivationNote)
 			}
 
-			if got.Updated.String() == tc.os.Updated.String() {
+			if got.Updated.Equal(tc.os.Updated) {
 				t.Errorf("got.Updated = %v, want different value", got.Updated)
 			}
 			if tc.verifyChildSpanner {

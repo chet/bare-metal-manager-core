@@ -888,7 +888,7 @@ func TestVpcPrefixSQLDAO_Update(t *testing.T) {
 				assert.Equal(t, *tc.expectedStatus, got.Status)
 				assert.Equal(t, *tc.expectedIsMissingOnSite, got.IsMissingOnSite)
 
-				if got.Updated.String() == VpcPrefix1.Updated.String() {
+				if got.Updated.Equal(VpcPrefix1.Updated) {
 					t.Errorf("got.Updated = %v, want different value", got.Updated)
 				}
 

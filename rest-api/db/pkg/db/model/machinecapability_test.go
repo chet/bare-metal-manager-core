@@ -1366,7 +1366,7 @@ func TestMachineCapabilitySQLDAO_Update(t *testing.T) {
 				assert.Equal(t, tc.InactiveDevices, got.InactiveDevices)
 			}
 
-			assert.NotEqual(t, got.Updated.String(), tc.mc.Updated.String())
+			assert.False(t, got.Updated.Equal(tc.mc.Updated))
 
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

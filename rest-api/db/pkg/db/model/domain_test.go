@@ -517,7 +517,7 @@ func TestDomainSQLDAO_Update(t *testing.T) {
 					assert.Equal(t, *tc.expectedControllerDomainID, *got.ControllerDomainID)
 				}
 
-				if got.Updated.String() == tc.paramDomain.Updated.String() {
+				if got.Updated.Equal(tc.paramDomain.Updated) {
 					t.Errorf("got.Updated = %v, want different value", got.Updated)
 				}
 

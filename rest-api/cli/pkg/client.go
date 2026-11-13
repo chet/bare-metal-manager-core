@@ -85,7 +85,7 @@ func (e *APIError) Error() string {
 	if e.Data != nil {
 		dataJSON, err := json.Marshal(e.Data)
 		if err == nil && string(dataJSON) != "null" {
-			return fmt.Sprintf("API error %d: %s\nDetails: %s", e.StatusCode, msg, string(dataJSON))
+			return fmt.Sprintf("API error %d: %s\nDetails: %s", e.StatusCode, msg, dataJSON)
 		}
 	}
 	return fmt.Sprintf("API error %d: %s", e.StatusCode, msg)

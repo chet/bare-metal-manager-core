@@ -4,6 +4,7 @@
 package firmwaremanager
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -313,7 +314,7 @@ func TestIntegration_FirmwareManager_GetPendingUpdates(t *testing.T) {
 	assert.Len(t, pending, 1, "Should have 1 pending update after completing 2")
 
 	// Verify the pending one is the correct PMC
-	assert.Equal(t, pmcs[2].GetMac().String(), pending[0].PmcMacAddress.String())
+	assert.True(t, bytes.Equal(pmcs[2].GetMac(), pending[0].PmcMacAddress))
 }
 
 // TestIntegration_FirmwareManager_BlockDuplicateUpdate tests that duplicate updates are blocked

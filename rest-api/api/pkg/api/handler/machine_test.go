@@ -1548,10 +1548,10 @@ func TestMachineHandler_GetAll(t *testing.T) {
 				q.Add("includeRelation", *tc.queryIncludeRelations3)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -2818,7 +2818,7 @@ func TestMachineHandler_Update(t *testing.T) {
 					assert.Nil(t, err)
 					if tt.args.reqMachineInstanceTypeCount != nil {
 						assert.Equal(t, total, *tt.args.reqMachineInstanceTypeCount)
-						assert.Equal(t, emits[0].InstanceTypeID.String(), tt.args.reqInstanceType.ID.String())
+						assert.Equal(t, emits[0].InstanceTypeID, tt.args.reqInstanceType.ID)
 					}
 				}
 

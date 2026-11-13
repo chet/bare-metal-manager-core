@@ -168,7 +168,7 @@ func TestStringHash(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			result := stringHash(tc.input)
 			if result != tc.expected {
-				t.Errorf("stringHash(%q) = %q, want %q", string(tc.input), result, tc.expected)
+				t.Errorf("stringHash(%q) = %q, want %q", tc.input, result, tc.expected)
 			}
 		})
 	}

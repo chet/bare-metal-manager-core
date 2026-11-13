@@ -35,6 +35,25 @@ func TestNormalizeBaseURL(t *testing.T) {
 	require.Equal(t, "", normalizeBaseURL(""))
 }
 
+func TestSameBaseURL(t *testing.T) {
+	cases := []struct {
+		name string
+		a    string
+		b    string
+	}{
+		{
+			name: "absent and empty passwords differ",
+			a:    "https://user@example.com",
+			b:    "https://user:@example.com",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.False(t, sameBaseURL(tc.a, tc.b))
+		})
+	}
+}
+
 func TestNormalizeToken(t *testing.T) {
 	require.Equal(t, "abc.def", normalizeToken("Bearer abc.def"))
 	require.Equal(t, "abc.def", normalizeToken("bearer abc.def"))

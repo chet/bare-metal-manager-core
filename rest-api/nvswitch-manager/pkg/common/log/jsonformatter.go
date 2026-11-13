@@ -61,7 +61,7 @@ func (f *JSONFormatter) Format(entry *log.Entry) ([]byte, error) {
 		}
 
 		b.WriteString(" ")
-		b.WriteString(string(data))
+		b.Write(data)
 	}
 
 	b.WriteByte('\n')

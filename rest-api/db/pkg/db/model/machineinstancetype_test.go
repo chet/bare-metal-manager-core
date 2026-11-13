@@ -326,7 +326,7 @@ func TestMachineInstanceTypeSQLDAO_Update(t *testing.T) {
 		assert.Equal(t, mi.MachineID, machineID[i])
 		assert.Equal(t, mi.InstanceTypeID, inst[1].ID)
 
-		if mi.Updated.String() == inst[i].Updated.String() {
+		if mi.Updated.Equal(inst[i].Updated) {
 			t.Errorf("mi.Updated = %v, want different value", mi.Updated)
 		}
 
@@ -345,7 +345,7 @@ func TestMachineInstanceTypeSQLDAO_Update(t *testing.T) {
 		assert.Equal(t, mi.MachineID, machineID[numInstances+i])
 		assert.Equal(t, mi.InstanceTypeID, inst[1].ID)
 
-		if mi.Updated.String() == inst[i].Updated.String() {
+		if mi.Updated.Equal(inst[i].Updated) {
 			t.Errorf("mi.Updated = %v, want different value", mi.Updated)
 		}
 
