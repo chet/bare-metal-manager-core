@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1722,7 +1723,7 @@ func handleIntegrationIdentityProviders(res http.ResponseWriter, req *http.Reque
 		responseBody := DefaultMockResponses.IDPs
 
 		res.Header().Set("Content-Type", "application/json")
-		res.Header().Set("Content-Length", fmt.Sprintf("%d", len(responseBody)))
+		res.Header().Set("Content-Length", strconv.Itoa(len(responseBody)))
 		res.WriteHeader(http.StatusOK)
 		_, _ = res.Write([]byte(responseBody))
 	} else {

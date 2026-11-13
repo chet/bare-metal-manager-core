@@ -1407,6 +1407,9 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			fmt.Println("domainID=", *tc.input.DomainID)
+			predecessor, getErr := ssd.GetByID(ctx, nil, tc.input.SubnetId, nil)
+			require.NoError(t, getErr)
+			previousUpdated := predecessor.Updated
 			got, err := ssd.Update(
 				ctx, nil, SubnetUpdateInput{
 					SubnetId:                   tc.input.SubnetId,
@@ -1485,9 +1488,7 @@ func TestSubnetSQLDAO_Update(t *testing.T) {
 					}
 				}
 
-				if got.Updated.String() == subnet1.Updated.String() {
-					t.Errorf("got.Updated = %v, want different value", got.Updated)
-				}
+				assert.False(t, got.Updated.Equal(previousUpdated), "timestamp change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 			} else {
 				assert.Nil(t, got)

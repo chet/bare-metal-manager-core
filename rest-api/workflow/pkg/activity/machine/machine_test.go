@@ -374,8 +374,6 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 
 	sdDAO := cdbm.NewStatusDetailDAO(dbSession)
 
-	var memSize uint32 = 16384
-
 	// Build MachineInfo which is sent by Site Agent
 	// This machine exists in DB
 	newMachineInterface1 := &corev1.MachineInterface{
@@ -483,7 +481,7 @@ func TestManageMachine_UpdateMachinesInDB(t *testing.T) {
 					Memory: []*corev1.MachineCapabilityAttributesMemory{
 						{
 							Name:     "DDR4",
-							Capacity: cutil.GetPtr(fmt.Sprintf("%d", memSize)),
+							Capacity: cutil.GetPtr("16384"),
 							Count:    8,
 						},
 						{

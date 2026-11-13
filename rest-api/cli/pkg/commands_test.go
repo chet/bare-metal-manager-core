@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2094,13 +2095,14 @@ func testNewApp_VpcPeeringList(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name          string
-		flags         []string
-		pages         []string
-		wantRelations []string
-		wantTable     string
-		wantJSON      bool
-		wantYAML      bool
+		name              string
+		flags             []string
+		pages             []string
+		wantRelations     []string
+		wantTable         string
+		wantTableContains string
+		wantJSON          bool
+		wantYAML          bool
 	}{
 		{
 			name:          "defaults to table and requests both VPC relations",
@@ -2124,10 +2126,11 @@ func testNewApp_VpcPeeringList(t *testing.T) {
 			wantYAML: true,
 		},
 		{
-			name:          "all keeps relations across pages",
-			flags:         []string{"--all", "--include-relation", "Site"},
-			pages:         []string{string(firstPageBody), string(secondPageBody)},
-			wantRelations: []string{"Site", "Vpc1", "Vpc2"},
+			name:              "all keeps relations across pages",
+			flags:             []string{"--all", "--include-relation", "Site"},
+			pages:             []string{string(firstPageBody), string(secondPageBody)},
+			wantRelations:     []string{"Site", "Vpc1", "Vpc2"},
+			wantTableContains: "last-peering",
 		},
 	}
 
@@ -2164,12 +2167,15 @@ func testNewApp_VpcPeeringList(t *testing.T) {
 			for index, query := range requests {
 				assert.Equal(t, test.wantRelations, query["includeRelation"])
 				if len(test.pages) > 1 {
-					assert.Equal(t, fmt.Sprint(index+1), query.Get("pageNumber"))
+					assert.Equal(t, strconv.Itoa(index+1), query.Get("pageNumber"))
 					assert.Equal(t, "100", query.Get("pageSize"))
 				}
 			}
 			if test.wantTable != "" {
 				assert.Equal(t, test.wantTable, output)
+			}
+			if test.wantTableContains != "" {
+				assert.Contains(t, output, test.wantTableContains)
 			}
 			if test.wantJSON {
 				assert.JSONEq(t, response, output)

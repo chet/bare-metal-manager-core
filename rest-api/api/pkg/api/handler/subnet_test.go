@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,8 +12,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
@@ -612,10 +615,10 @@ func TestSubnetHandler_Create(t *testing.T) {
 	}
 }
 
-func testCreateSubnet(t *testing.T, dbSession *cdb.Session, scp *sc.ClientPool, ipamStorage cipam.Storage, user *cdbm.User, reqOrgName, reqBody string) *model.APISubnet {
+func testCreateSubnet(t *testing.T, dbSession *cdb.Session, scp *sc.ClientPool, ipamStorage cipam.Storage, user *cdbm.User, reqOrgName string, reqBody []byte) *model.APISubnet {
 	ctx := context.Background()
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(reqBody))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	ec := e.NewContext(req, rec)
@@ -750,7 +753,7 @@ func TestSubnetHandler_GetAll(t *testing.T) {
 		prefixLen := 24
 		subnetBody, err := json.Marshal(model.APISubnetCreateRequest{Name: fmt.Sprintf("subnet-%02d", i), Description: cutil.GetPtr(""), VpcID: vpcID.String(), IPv4BlockID: cutil.GetPtr(ipbID.String()), PrefixLength: prefixLen})
 		assert.Nil(t, err)
-		apiSubnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(subnetBody))
+		apiSubnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, subnetBody)
 		assert.NotNil(t, apiSubnet)
 
 		sid, _ := uuid.Parse(apiSubnet.ID)
@@ -1028,10 +1031,10 @@ func TestSubnetHandler_GetAll(t *testing.T) {
 				q.Add("status", *tc.queryStatus)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -1195,13 +1198,13 @@ func TestSubnetHandler_Get(t *testing.T) {
 	parentIpbBody, err := json.Marshal(model.APISubnetCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
 
-	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(parentIpbBody))
+	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, parentIpbBody)
 
 	ifaceSubnetBody, err := json.Marshal(model.APISubnetCreateRequest{
 		Name: "iface-subnet-usage", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(),
 		IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
 	require.NoError(t, err)
-	subnetWithIfaceWorkload := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(ifaceSubnetBody))
+	subnetWithIfaceWorkload := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, ifaceSubnetBody)
 	var wantUsageAcquiredPrefixes0 uint64
 	wantUsageAcquiredPrefixes1 := uint64(0)
 
@@ -1511,9 +1514,9 @@ func TestSubnetHandler_Update(t *testing.T) {
 	subnetBody2, err := json.Marshal(model.APISubnetCreateRequest{Name: "test-subnet-2", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
 
-	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(subnetBody))
+	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, subnetBody)
 
-	subnet2 := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(subnetBody2))
+	subnet2 := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, subnetBody2)
 	assert.NotNil(t, subnet2)
 
 	errBody1, err := json.Marshal(model.APIAllocationUpdateRequest{Name: cutil.GetPtr("a")})
@@ -1680,6 +1683,12 @@ func TestSubnetHandler_Update(t *testing.T) {
 				tc:        tempClient,
 				cfg:       cfg,
 			}
+			var previousUpdated time.Time
+			if !tc.expectedErr {
+				predecessor, getErr := cdbm.NewSubnetDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tc.id), nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
@@ -1694,7 +1703,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 				if tc.expectedDesc != nil {
 					assert.Equal(t, *tc.expectedDesc, *rsp.Description)
 				}
-				assert.NotEqual(t, rsp.Updated.String(), subnet.Updated.String())
+				assert.False(t, rsp.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rsp.Updated)
 				assert.Equal(t, cdbm.IPBlockRoutingTypeDatacenterOnly, *rsp.RoutingType)
 			}
 
@@ -1832,9 +1841,9 @@ func TestSubnetHandler_Delete(t *testing.T) {
 	okBodyFG, err := json.Marshal(model.APISubnetCreateRequest{Name: "okFG", Description: cutil.GetPtr(""), VpcID: vpc1.ID.String(), IPv4BlockID: cutil.GetPtr(ipbFG.ID.String()), PrefixLength: prefixLen})
 	assert.Nil(t, err)
 
-	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBody))
-	subnet2 := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBody2))
-	subnetFG := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBodyFG))
+	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBody)
+	subnet2 := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBody2)
+	subnetFG := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBodyFG)
 	subnet2ID := uuid.MustParse(subnet2.ID)
 
 	it1 := testMachineBuildInstanceType(t, dbSession, ip, site, "testIT")
@@ -1850,7 +1859,7 @@ func TestSubnetHandler_Delete(t *testing.T) {
 	acGoodIT := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it1.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 2}
 	okBodyIT, err := json.Marshal(model.APIAllocationCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), TenantID: tenant1.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIT}})
 	assert.Nil(t, err)
-	aIT := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okBodyIT))
+	aIT := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okBodyIT)
 	_ = uuid.MustParse(aIT.ID)
 	_ = uuid.MustParse(aIT.AllocationConstraints[0].ID)
 	os1 := testAllocationBuildOperatingSystem(t, dbSession, "ubuntu")

@@ -2235,7 +2235,7 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 			for range requestCount {
 				workflowCount := len(capturedRequests)
 				url := "/v2/org/" + org + "/nico/expected-machine/" + testEM.ID.String()
-				req := httptest.NewRequest(http.MethodPatch, url, bytes.NewBufferString(tc.body))
+				req := httptest.NewRequest(http.MethodPatch, url, strings.NewReader(tc.body))
 				req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 				rec := httptest.NewRecorder()
 				c := e.NewContext(req, rec)

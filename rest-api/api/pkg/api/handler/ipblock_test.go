@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -771,7 +772,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 		name               string
 		reqOrgName         string
 		reqBody            string
-		reqIpb             *cdbm.IPBlock
 		user               *cdbm.User
 		ipbID              string
 		expectedErr        bool
@@ -784,7 +784,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			name:           "error when user not found in request context",
 			reqOrgName:     ipOrg1,
 			reqBody:        string(okBody1),
-			reqIpb:         ipb1,
 			user:           nil,
 			ipbID:          ipb1.ID.String(),
 			expectedErr:    true,
@@ -794,7 +793,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
 			reqBody:        string(okBody1),
-			reqIpb:         ipb1,
 			user:           user,
 			ipbID:          ipb1.ID.String(),
 			expectedErr:    true,
@@ -804,7 +802,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			name:           "error when reqBody doesnt bind",
 			reqOrgName:     ipOrg1,
 			reqBody:        "BadBody",
-			reqIpb:         ipb1,
 			user:           user,
 			ipbID:          ipb1.ID.String(),
 			expectedErr:    true,
@@ -814,7 +811,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			name:           "error when reqBody json doesnt validate",
 			reqOrgName:     ipOrg1,
 			reqBody:        string(errBody1),
-			reqIpb:         ipb1,
 			user:           user,
 			ipbID:          ipb1.ID.String(),
 			expectedErr:    true,
@@ -825,7 +821,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			reqOrgName:     ipOrg3,
 			reqBody:        string(okBody1),
 			user:           user,
-			reqIpb:         ipb1,
 			ipbID:          ipb1.ID.String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusNotFound,
@@ -843,7 +838,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			name:           "error when specified ipblock id is invalid uuid",
 			reqOrgName:     ipOrg1,
 			reqBody:        string(okBody1),
-			reqIpb:         ipb1,
 			user:           user,
 			ipbID:          "bad$uuid",
 			expectedErr:    true,
@@ -853,7 +847,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			name:           "error when specified ipblock doesnt exist",
 			reqOrgName:     ipOrg1,
 			reqBody:        string(okBody1),
-			reqIpb:         ipb1,
 			user:           user,
 			ipbID:          uuid.New().String(),
 			expectedErr:    true,
@@ -863,7 +856,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			name:           "error due to name clash",
 			reqOrgName:     ipOrg1,
 			reqBody:        string(errBodyNameClash),
-			reqIpb:         ipb1,
 			user:           user,
 			ipbID:          ipb1.ID.String(),
 			expectedErr:    true,
@@ -873,7 +865,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			name:           "provider cannot update a Tenant SitePrefix",
 			reqOrgName:     ipOrg1,
 			reqBody:        string(okBody1),
-			reqIpb:         tenantSitePrefix,
 			user:           user,
 			ipbID:          tenantSitePrefix.ID.String(),
 			expectedErr:    true,
@@ -883,7 +874,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			name:               "success case 1",
 			reqOrgName:         ipOrg1,
 			reqBody:            string(okBody1),
-			reqIpb:             ipb1,
 			user:               user,
 			ipbID:              ipb1.ID.String(),
 			expectedErr:        false,
@@ -896,7 +886,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 			name:           "success case 2",
 			reqOrgName:     ipOrg2,
 			reqBody:        string(okBody2),
-			reqIpb:         ipb2,
 			user:           user,
 			ipbID:          ipb2.ID.String(),
 			expectedErr:    false,
@@ -930,6 +919,12 @@ func TestIPBlockHandler_Update(t *testing.T) {
 				tc:        tempClient,
 				cfg:       cfg,
 			}
+			var previousUpdated time.Time
+			if !tc.expectedErr {
+				predecessor, getErr := cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tc.ipbID), nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
@@ -944,7 +939,7 @@ func TestIPBlockHandler_Update(t *testing.T) {
 				if tc.expectedDesc != nil {
 					assert.Equal(t, *tc.expectedDesc, *rsp.Description)
 				}
-				assert.NotEqual(t, tc.reqIpb.Updated.String(), rsp.Updated.String())
+				assert.False(t, rsp.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rsp.Updated)
 			}
 
 			if tc.verifyChildSpanner {
@@ -1778,10 +1773,10 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 			}
 
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -1812,14 +1807,13 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 			err := gaipbh.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
-			if tc.expectedErr {
-				return
-			}
-
 			if rec.Code != tc.expectedStatus {
 				t.Errorf("response %v", rec.Body.String())
 			}
 			require.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedErr {
+				return
+			}
 
 			resp := []model.APIIPBlock{}
 			err = json.Unmarshal(rec.Body.Bytes(), &resp)
@@ -2071,21 +2065,25 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 			expectedStatus: http.StatusNotFound,
 		},
 		{
-			name:                   "success when valid parent id with two derived blocks are specified specified",
-			reqOrgName:             ipOrg1,
-			user:                   ipu,
-			ipbID:                  parentIpb1.ID.String(),
-			expectedErr:            false,
-			expectedStatus:         http.StatusOK,
-			expectedCnt:            2,
-			expectedTotal:          cutil.GetPtr(2),
-			queryIncludeRelations1: cutil.GetPtr(cdbm.InfrastructureProviderRelationName),
-			queryIncludeRelations2: cutil.GetPtr(cdbm.SiteRelationName),
-			queryIncludeRelations3: cutil.GetPtr(cdbm.TenantRelationName),
-			pageNumber:             cutil.GetPtr(1),
-			pageSize:               cutil.GetPtr(2),
-			orderBy:                cutil.GetPtr("NAME_DESC"),
-			verifyChildSpanner:     true,
+			name:                              "success when valid parent id with two derived blocks are specified specified",
+			reqOrgName:                        ipOrg1,
+			user:                              ipu,
+			ipbID:                             parentIpb1.ID.String(),
+			expectedErr:                       false,
+			expectedStatus:                    http.StatusOK,
+			expectedCnt:                       2,
+			expectedTotal:                     cutil.GetPtr(2),
+			queryIncludeRelations1:            cutil.GetPtr(cdbm.InfrastructureProviderRelationName),
+			queryIncludeRelations2:            cutil.GetPtr(cdbm.SiteRelationName),
+			queryIncludeRelations3:            cutil.GetPtr(cdbm.TenantRelationName),
+			pageNumber:                        cutil.GetPtr(1),
+			pageSize:                          cutil.GetPtr(2),
+			orderBy:                           cutil.GetPtr("NAME_DESC"),
+			expectedFirstEntry:                childIpb4,
+			expectedInfrastructureProviderOrg: cutil.GetPtr(ip.Org),
+			expectedSiteName:                  cutil.GetPtr(site.Name),
+			expectedTenantOrg:                 cutil.GetPtr(tn.Org),
+			verifyChildSpanner:                true,
 		},
 		{
 			name:               "success when user has Provider viewer role",
@@ -2171,10 +2169,10 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 				q.Add("includeRelation", *tc.queryIncludeRelations3)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -2207,14 +2205,13 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 			err := gaipbh.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
-			if tc.expectedErr {
-				return
-			}
-
 			if rec.Code != tc.expectedStatus {
 				t.Errorf("response %v", rec.Body.String())
 			}
 			require.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedErr {
+				return
+			}
 
 			resp := []model.APIIPBlock{}
 			err = json.Unmarshal(rec.Body.Bytes(), &resp)
@@ -2233,17 +2230,22 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 			}
 
 			if tc.expectedFirstEntry != nil {
+				require.NotEmpty(t, resp)
 				assert.Equal(t, tc.expectedFirstEntry.Name, resp[0].Name)
 			}
 
 			if tc.queryIncludeRelations1 != nil || tc.queryIncludeRelations2 != nil || tc.queryIncludeRelations3 != nil {
+				require.NotEmpty(t, resp)
 				if tc.expectedInfrastructureProviderOrg != nil {
+					require.NotNil(t, resp[0].InfrastructureProvider)
 					assert.Equal(t, *tc.expectedInfrastructureProviderOrg, resp[0].InfrastructureProvider.Org)
 				}
 				if tc.expectedSiteName != nil {
+					require.NotNil(t, resp[0].Site)
 					assert.Equal(t, *tc.expectedSiteName, resp[0].Site.Name)
 				}
 				if tc.expectedTenantOrg != nil {
+					require.NotNil(t, resp[0].Tenant)
 					assert.Equal(t, *tc.expectedTenantOrg, resp[0].Tenant.Org)
 				}
 			} else {

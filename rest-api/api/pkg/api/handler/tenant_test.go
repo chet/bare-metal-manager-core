@@ -420,7 +420,7 @@ func TestGetCurrentTenantStatsHandler_Handle(t *testing.T) {
 	scp := sc.NewClientPool(tcfg)
 	scp.IDClientMap[st.ID.String()] = tsc
 
-	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu1, tnOrg1, string(parentIpbBody))
+	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu1, tnOrg1, parentIpbBody)
 	assert.NotNil(t, subnet)
 
 	// Create Instance

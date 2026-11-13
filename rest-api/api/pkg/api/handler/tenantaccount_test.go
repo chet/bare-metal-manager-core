@@ -4,14 +4,17 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
@@ -734,6 +737,12 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 				tc:        tempClient,
 				cfg:       cfg,
 			}
+			var previousUpdated time.Time
+			if !tc.expectedErr {
+				predecessor, getErr := cdbm.NewTenantAccountDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tc.taID), nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
 
@@ -763,7 +772,7 @@ func TestTenantAccountHandler_Update(t *testing.T) {
 				assert.Equal(t, ip.ID.String(), rsp.InfrastructureProviderID)
 				assert.Equal(t, tc.tnID, *rsp.TenantID)
 				assert.Equal(t, cdbm.TenantAccountStatusReady, rsp.Status)
-				assert.NotEqual(t, rsp.Updated.String(), tc.ta.Updated.String())
+				assert.False(t, rsp.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rsp.Updated)
 			}
 
 			if tc.verifyChildSpanner {
@@ -813,7 +822,7 @@ func TestTenantAccountHandler_UpdateSiteCapabilities(t *testing.T) {
 		require.NoError(t, err)
 
 		e := echo.New()
-		req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(body)))
+		req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(body))
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		rec := httptest.NewRecorder()
 		ec := e.NewContext(req, rec)
@@ -1499,7 +1508,6 @@ func TestTenantAccountHandler_GetAll(t *testing.T) {
 			queryIncludeRelations2:        cutil.GetPtr(cdbm.IPBlockRelationName),
 			pageNumber:                    cutil.GetPtr(1),
 			pageSize:                      cutil.GetPtr(10),
-			orderBy:                       cutil.GetPtr("TEST_ASC"),
 			expectedErr:                   true,
 			expectedStatus:                http.StatusBadRequest,
 			expectedCnt:                   0,
@@ -1757,10 +1765,10 @@ func TestTenantAccountHandler_GetAll(t *testing.T) {
 				q.Add("includeRelation", *tc.queryIncludeRelations2)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -1790,14 +1798,13 @@ func TestTenantAccountHandler_GetAll(t *testing.T) {
 			err := gatah.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
-			if tc.expectedErr {
-				return
-			}
-
 			if rec.Code != tc.expectedStatus {
 				t.Errorf("response %v", rec.Body.String())
 			}
 			require.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.expectedErr {
+				return
+			}
 
 			resp := []model.APITenantAccount{}
 			err = json.Unmarshal(rec.Body.Bytes(), &resp)

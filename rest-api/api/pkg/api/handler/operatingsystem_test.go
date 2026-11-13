@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +21,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	cdmu "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -464,8 +467,9 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 
 	for i := 0; i < totalCount; i++ {
 		os := &cdbm.OperatingSystem{}
+		var err error
 		if i == 0 || i == 1 {
-			os, err := osDAO.Create(
+			os, err = osDAO.Create(
 				ctx,
 				nil,
 				cdbm.OperatingSystemCreateInput{
@@ -493,7 +497,7 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 			common.TestBuildStatusDetail(t, dbSession, os.ID.String(), cdbm.OperatingSystemStatusSyncing, cutil.GetPtr("received Operating System creation request, syncing"))
 			common.TestBuildStatusDetail(t, dbSession, os.ID.String(), cdbm.OperatingSystemStatusReady, cutil.GetPtr("Operating System is now ready for use"))
 		} else {
-			os, err := osDAO.Create(
+			os, err = osDAO.Create(
 				ctx,
 				nil,
 				cdbm.OperatingSystemCreateInput{
@@ -677,7 +681,7 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 			expectedErr:        false,
 			expectedStatus:     http.StatusOK,
 			expectedCnt:        10,
-			expectedTotal:      cutil.GetPtr(totalCount / 2),
+			expectedTotal:      &totalCount,
 			expectedFirstEntry: &oss[29],
 		},
 		{
@@ -729,7 +733,7 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
 			expectedCnt:    paginator.DefaultLimit,
-			expectedTotal:  cutil.GetPtr(totalCount),
+			expectedTotal:  cutil.GetPtr(totalCount - 2),
 		},
 		{
 			name:           "success when BadStatus status is specified",
@@ -801,10 +805,10 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 				q.Add("includeRelation", *tc.queryIncludeRelations2)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -841,6 +845,29 @@ func TestOperatingSystemHandler_GetAll(t *testing.T) {
 				err := json.Unmarshal(rec.Body.Bytes(), &rsp)
 				assert.Nil(t, err)
 				assert.Equal(t, tc.expectedCnt, len(rsp))
+				header := rec.Header().Get(pagination.ResponseHeaderName)
+				require.NotEmpty(t, header)
+				page := &pagination.PageResponse{}
+				require.NoError(t, json.Unmarshal([]byte(header), page))
+				expectedPageNumber, expectedPageSize := 1, paginator.DefaultLimit
+				if tc.pageNumber != nil {
+					expectedPageNumber = *tc.pageNumber
+				}
+				if tc.pageSize != nil {
+					expectedPageSize = *tc.pageSize
+				}
+				assert.Equal(t, expectedPageNumber, page.PageNumber)
+				assert.Equal(t, expectedPageSize, page.PageSize)
+				assert.Equal(t, tc.orderBy, page.OrderBy)
+				if tc.expectedTotal != nil {
+					assert.Equal(t, *tc.expectedTotal, page.Total)
+				} else if tc.expectedCnt == 0 {
+					assert.Zero(t, page.Total)
+				}
+				if tc.expectedFirstEntry != nil {
+					require.NotEmpty(t, rsp)
+					assert.Equal(t, tc.expectedFirstEntry.Name, rsp[0].Name)
+				}
 
 				if tc.queryIncludeRelations1 != nil || tc.queryIncludeRelations2 != nil {
 					if tc.expectedInfrastructureProviderOrg != nil {
@@ -2034,7 +2061,7 @@ func TestOperatingSystemHandler_Delete(t *testing.T) {
 	acGoodIT := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it3.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 2}
 	okBodyIT, err := json.Marshal(model.APIAllocationCreateRequest{Name: "ok1", Description: cutil.GetPtr(""), TenantID: tenant3.ID.String(), SiteID: site.ID.String(), AllocationConstraints: []model.APIAllocationConstraintCreateRequest{acGoodIT}})
 	assert.Nil(t, err)
-	testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg3, string(okBodyIT))
+	testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg3, okBodyIT)
 	instanceDAO := cdbm.NewInstanceDAO(dbSession)
 	instance, err := instanceDAO.Create(
 		ctx, nil,
@@ -2512,7 +2539,7 @@ func TestOperatingSystemHandler_Create_Ownership(t *testing.T) {
 			require.NoError(t, err)
 
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -2593,7 +2620,7 @@ func TestOperatingSystemHandler_Update_Ownership(t *testing.T) {
 			require.NoError(t, err)
 
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPut, "/", strings.NewReader(string(body)))
+			req := httptest.NewRequest(http.MethodPut, "/", bytes.NewReader(body))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 

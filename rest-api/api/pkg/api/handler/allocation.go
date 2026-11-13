@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1273,13 +1274,7 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 		// for a single allocation, so this should be cleaned up once allocations and
 		// constraints have merged into a single object.
 		slices.SortFunc(acs, func(a, b cdbm.AllocationConstraint) int {
-			if a.ResourceTypeID.String() < b.ResourceTypeID.String() {
-				return -1
-			}
-			if a.ResourceTypeID.String() > b.ResourceTypeID.String() {
-				return 1
-			}
-			return 0
+			return bytes.Compare(a.ResourceTypeID[:], b.ResourceTypeID[:])
 		})
 		for _, ac := range acs {
 			switch ac.ResourceType {

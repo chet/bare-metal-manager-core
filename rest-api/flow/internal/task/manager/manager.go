@@ -4,6 +4,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -367,7 +368,7 @@ func (m *ManagerImpl) validateSubmissionRackTargets(
 		rackIDs = append(rackIDs, rackID)
 	}
 	slices.SortFunc(rackIDs, func(a, b uuid.UUID) int {
-		return strings.Compare(a.String(), b.String())
+		return bytes.Compare(a[:], b[:])
 	})
 
 	for _, rackID := range rackIDs {

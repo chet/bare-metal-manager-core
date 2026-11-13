@@ -137,39 +137,39 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 
 	// Allocation 1
-	aIT1 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyIT1))
+	aIT1 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okABodyIT1)
 	aID1, _ := uuid.Parse(aIT1.ID)
 	assert.NotNil(t, aID1)
 	acID1 := uuid.MustParse(aIT1.AllocationConstraints[0].ID)
 	assert.NotNil(t, acID1)
 
-	aIPB1 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyIPB1))
+	aIPB1 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okABodyIPB1)
 	aipID1, _ := uuid.Parse(aIPB1.ID)
 	assert.NotNil(t, aipID1)
 	acipID1 := uuid.MustParse(aIPB1.AllocationConstraints[0].ID)
 	assert.NotNil(t, acipID1)
 
 	// Allocation 2
-	aIT2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyIT2))
+	aIT2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okABodyIT2)
 	aID2, _ := uuid.Parse(aIT2.ID)
 	assert.NotNil(t, aID2)
 	acID2 := uuid.MustParse(aIT2.AllocationConstraints[0].ID)
 	assert.NotNil(t, acID2)
 
-	aIPB2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyIPB2))
+	aIPB2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okABodyIPB2)
 	aipID2, _ := uuid.Parse(aIPB2.ID)
 	assert.NotNil(t, aipID2)
 	acipID2 := uuid.MustParse(aIPB2.AllocationConstraints[0].ID)
 	assert.NotNil(t, acipID2)
 
-	aIPB3 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyIPB3))
+	aIPB3 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okABodyIPB3)
 	aipID3, _ := uuid.Parse(aIPB3.ID)
 	assert.NotNil(t, aipID3)
 
-	operatorRootAllocation := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(operatorRootAllocationBody))
+	operatorRootAllocation := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, operatorRootAllocationBody)
 	operatorRootAllocationID := uuid.MustParse(operatorRootAllocation.ID)
 
-	aITTenant2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(okABodyITTenant2))
+	aITTenant2 := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, okABodyITTenant2)
 	assert.NotNil(t, aITTenant2)
 
 	// Get Allocation Constraints for above Allocations
@@ -206,7 +206,7 @@ func TestAllocationConstraintHandler_Update(t *testing.T) {
 		AllocationConstraints: []model.APIAllocationConstraintCreateRequest{{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipbV6.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 80}},
 	})
 	require.NoError(t, err)
-	v6Allocation := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, string(v6AllocationBody))
+	v6Allocation := testCreateAllocation(t, dbSession, ipamStorage, ipu, ipOrg1, v6AllocationBody)
 	v6Constraint, err := acDAO.GetByID(ctx, nil, uuid.MustParse(v6Allocation.AllocationConstraints[0].ID), nil)
 	require.NoError(t, err)
 	require.NotNil(t, v6Constraint.DerivedResourceID)

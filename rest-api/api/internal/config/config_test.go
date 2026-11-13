@@ -4,6 +4,7 @@
 package config
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,7 +27,7 @@ type logContainsWriter struct {
 }
 
 func (w logContainsWriter) Write(p []byte) (int, error) {
-	if strings.Contains(string(p), w.needle) {
+	if bytes.Contains(p, []byte(w.needle)) {
 		select {
 		case w.seen <- struct{}{}:
 		default:

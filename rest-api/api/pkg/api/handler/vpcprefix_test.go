@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -851,11 +853,11 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			Prefix:    cutil.GetPtr("168.175.0.0/24"),
 		})
 		require.NoError(t, err)
-		explicitRetry := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg2, string(explicitRetryBody))
+		explicitRetry := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg2, explicitRetryBody)
 		require.NotNil(t, explicitRetry.Prefix)
 		assert.Equal(t, "168.175.0.0/24", *explicitRetry.Prefix)
 
-		fullGrantRetry := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg2, string(fullGrantTimeoutBody))
+		fullGrantRetry := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg2, fullGrantTimeoutBody)
 		require.NotNil(t, fullGrantRetry.Prefix)
 		assert.Equal(t, "168.176.0.0/16", *fullGrantRetry.Prefix)
 		persistedFullGrantBlock, err = cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, ipb4FullGrant.ID, nil)
@@ -896,7 +898,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		require.NoError(t, err)
 
 		e := echo.New()
-		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(requestBody)))
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(requestBody))
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		rec := httptest.NewRecorder()
 		ec := e.NewContext(req, rec)
@@ -949,10 +951,10 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	})
 }
 
-func testCreateVpcPrefix(t *testing.T, dbSession *cdb.Session, scp *sc.ClientPool, ipamStorage cipam.Storage, user *cdbm.User, reqOrgName, reqBody string) *model.APIVpcPrefix {
+func testCreateVpcPrefix(t *testing.T, dbSession *cdb.Session, scp *sc.ClientPool, ipamStorage cipam.Storage, user *cdbm.User, reqOrgName string, reqBody []byte) *model.APIVpcPrefix {
 	ctx := context.Background()
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(reqBody))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	ec := e.NewContext(req, rec)
@@ -1087,7 +1089,7 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 		prefixLen := 24
 		vpcprefixBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: fmt.Sprintf("vpcprefix-%02d", i), VpcID: vpcID.String(), IPBlockID: cutil.GetPtr(ipbID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 		assert.Nil(t, err)
-		apiVpcPrefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(vpcprefixBody))
+		apiVpcPrefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, vpcprefixBody)
 		assert.NotNil(t, apiVpcPrefix)
 
 		sid, _ := uuid.Parse(apiVpcPrefix.ID)
@@ -1331,10 +1333,10 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 				q.Add("query", *tc.querySearch)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -1492,12 +1494,12 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 	parentIpbBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	assert.Nil(t, err)
 
-	vpcprefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(parentIpbBody))
+	vpcprefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, parentIpbBody)
 
 	ifaceWorkloadBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{
 		Name: "iface-usage-stats", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	require.NoError(t, err)
-	vpcprefixWithIfaceWorkload := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(ifaceWorkloadBody))
+	vpcprefixWithIfaceWorkload := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, ifaceWorkloadBody)
 
 	ipbV6 := testIPBlockBuildIPBlock(t, dbSession, "testipbv6", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8:200::", 48, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, ipu)
 	parentPrefV6, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbV6.Prefix, ipbV6.PrefixLength, ipbV6.RoutingType, ipbV6.InfrastructureProviderID.String(), ipbV6.SiteID.String())
@@ -1506,7 +1508,7 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 	ipv6Body, err := json.Marshal(model.APIVpcPrefixCreateRequest{
 		Name: "ipv6-usage-stats", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbV6.ID.String()), PrefixLength: cutil.GetPtr(64)})
 	require.NoError(t, err)
-	vpcprefixIPv6 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(ipv6Body))
+	vpcprefixIPv6 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, ipv6Body)
 
 	alWorkload := common.TestBuildAllocation(t, dbSession, site, tenant1, "get-vpfx-usage-iface-alloc", ipu)
 	itWorkload := common.TestBuildInstanceType(t, dbSession, "get-vpfx-iface-it", cutil.GetPtr(uuid.New()), site, nil, ipu)
@@ -1845,10 +1847,10 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 
 	tscCallCount := 0
 
-	vpcprefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(vpcprefixBody))
+	vpcprefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, vpcprefixBody)
 	tscCallCount++
 
-	vpcprefix2 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(vpcprefixBody2))
+	vpcprefix2 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, vpcprefixBody2)
 	tscCallCount++
 
 	errBody1, err := json.Marshal(model.APIAllocationUpdateRequest{Name: cutil.GetPtr("a")})
@@ -2023,6 +2025,12 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 				scp:       scp,
 				cfg:       cfg,
 			}
+			var previousUpdated time.Time
+			if !tc.expectedErr {
+				predecessor, getErr := cdbm.NewVpcPrefixDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tc.id), nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
@@ -2047,7 +2055,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 			assert.Equal(t, 1, len(resp.StatusHistory))
 			assert.Equal(t, tc.expectedName, resp.Name)
 
-			assert.NotEqual(t, resp.Updated.String(), vpcprefix.Updated.String())
+			assert.False(t, resp.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, resp.Updated)
 
 			require.Equal(t, tscCallCount+1, len(tsc.Calls))
 			tscCallCount++
@@ -2202,14 +2210,14 @@ func TestVpcPrefixHandler_Delete(t *testing.T) {
 	okBodyFG, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpc-prefix-full-grant", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbFG.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	assert.Nil(t, err)
 
-	vpcp1 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBody))
+	vpcp1 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBody)
 
-	vpcp2 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBody2))
+	vpcp2 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBody2)
 	vpcp2ID := uuid.MustParse(vpcp2.ID)
-	vpcp3 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBody3))
+	vpcp3 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBody3)
 	vpcp3ID := uuid.MustParse(vpcp3.ID)
 
-	vpcp1FG := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBodyFG))
+	vpcp1FG := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBodyFG)
 
 	ins1 := common.TestBuildInstance(t, dbSession, "test-instance-1", tn1.ID, ip.ID, site.ID, it1.ID, vpc1.ID, cutil.GetPtr(m1.ID), os1.ID)
 	dualStackInterface := common.TestBuildInterface(t, dbSession, ins1.ID, nil, &vpcp2ID, true, nil, nil, nil, cutil.GetPtr(cdbm.InterfaceStatusReady), tnu)

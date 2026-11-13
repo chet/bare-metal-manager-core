@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1009,7 +1010,7 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 			// Setup echo server/context
 			e := echo.New()
 			reqJSON, _ := json.Marshal(tt.args.reqData)
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(reqJSON)))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(reqJSON))
 			if tt.query != nil {
 				req.URL.RawQuery = tt.query.Encode()
 			}
@@ -1025,6 +1026,12 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
+			var previousUpdated time.Time
+			if !tt.wantErr {
+				predecessor, getErr := cdbm.NewSiteDAO(dbSession).GetByID(ctx, nil, tt.args.site.ID, nil, false, false)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			err := ush.Handle(ec)
 			assert.Nil(t, err)
 
@@ -1136,7 +1143,7 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 				}
 
 				if updated {
-					assert.NotEqual(t, tt.args.site.Updated.String(), rst.Updated.String())
+					assert.False(t, rst.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rst.Updated)
 				}
 
 				if tt.wantStatus != nil {

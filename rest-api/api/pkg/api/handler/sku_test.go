@@ -4,13 +4,13 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -2344,7 +2344,7 @@ func (f *skuManagementFixture) request(t *testing.T, method, skuID string, body 
 	t.Helper()
 	requestJSON, err := json.Marshal(body)
 	require.NoError(t, err)
-	req := httptest.NewRequest(method, "/", strings.NewReader(string(requestJSON)))
+	req := httptest.NewRequest(method, "/", bytes.NewReader(requestJSON))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	ec := echo.New().NewContext(req, rec)

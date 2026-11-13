@@ -129,7 +129,7 @@ func getUserDataFromNGC(baseURL string, ngcToken string, logger zerolog.Logger) 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		logger.Error().Str("Request URL", fmt.Sprintf("%v", reqURL)).
+		logger.Error().Str("Request URL", reqURL.String()).
 			Str("Response Status", resp.Status).Msg("invalid response code returned by NGC API")
 		return nil, fmt.Errorf("invalid response code: %v returned by NGC API", resp.StatusCode)
 	}

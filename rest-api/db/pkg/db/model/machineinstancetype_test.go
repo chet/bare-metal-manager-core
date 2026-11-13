@@ -13,6 +13,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 )
 
@@ -317,6 +318,9 @@ func TestMachineInstanceTypeSQLDAO_Update(t *testing.T) {
 
 	// 1st instance type [0-num] set to instanceType 2
 	for i := 0; i < numInstances; i++ {
+		predecessor, getErr := mitsd.GetByID(ctx, nil, machineInstanceTypes[i].ID, nil)
+		require.NoError(t, getErr)
+		previousUpdated := predecessor.Updated
 		mi, err := mitsd.Update(ctx, nil, MachineInstanceTypeUpdateInput{
 			MachineInstanceTypeID: machineInstanceTypes[i].ID,
 			InstanceTypeID:        &inst[1].ID,
@@ -326,9 +330,7 @@ func TestMachineInstanceTypeSQLDAO_Update(t *testing.T) {
 		assert.Equal(t, mi.MachineID, machineID[i])
 		assert.Equal(t, mi.InstanceTypeID, inst[1].ID)
 
-		if mi.Updated.String() == inst[i].Updated.String() {
-			t.Errorf("mi.Updated = %v, want different value", mi.Updated)
-		}
+		assert.False(t, mi.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, mi.Updated)
 
 		span := otrace.SpanFromContext(ctx)
 		assert.True(t, span.SpanContext().IsValid())
@@ -336,6 +338,9 @@ func TestMachineInstanceTypeSQLDAO_Update(t *testing.T) {
 
 	// 1st machine id [0-num] set to machine id 2
 	for i := 0; i < numInstances; i++ {
+		predecessor, getErr := mitsd.GetByID(ctx, nil, machineInstanceTypes[i].ID, nil)
+		require.NoError(t, getErr)
+		previousUpdated := predecessor.Updated
 		mi, err := mitsd.Update(ctx, nil, MachineInstanceTypeUpdateInput{
 			MachineInstanceTypeID: machineInstanceTypes[i].ID,
 			MachineID:             &machineID[numInstances+i],
@@ -345,9 +350,7 @@ func TestMachineInstanceTypeSQLDAO_Update(t *testing.T) {
 		assert.Equal(t, mi.MachineID, machineID[numInstances+i])
 		assert.Equal(t, mi.InstanceTypeID, inst[1].ID)
 
-		if mi.Updated.String() == inst[i].Updated.String() {
-			t.Errorf("mi.Updated = %v, want different value", mi.Updated)
-		}
+		assert.False(t, mi.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, mi.Updated)
 
 		span := otrace.SpanFromContext(ctx)
 		assert.True(t, span.SpanContext().IsValid())

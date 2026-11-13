@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -619,7 +621,7 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 			reqOrgName:             tnOrg1,
 			user:                   tnu1,
 			querySiteID:            cutil.GetPtr(site1.ID.String()),
-			queryIncludeRelations1: cutil.GetPtr(cdbm.SiteRelationName),
+			queryIncludeRelations3: cutil.GetPtr(cdbm.SiteRelationName),
 			expectedErr:            false,
 			expectedStatus:         http.StatusOK,
 			expectedCnt:            paginator.DefaultLimit,
@@ -646,7 +648,7 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 			expectedErr:        false,
 			expectedStatus:     http.StatusOK,
 			expectedCnt:        10,
-			expectedTotal:      cutil.GetPtr(totalCount / 2),
+			expectedTotal:      &totalCount,
 			expectedFirstEntry: &ibps[29],
 		},
 		{
@@ -750,14 +752,14 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 			if tc.queryIncludeRelations2 != nil {
 				q.Add("includeRelation", *tc.queryIncludeRelations2)
 			}
-			if tc.queryIncludeRelations2 != nil {
+			if tc.queryIncludeRelations3 != nil {
 				q.Add("includeRelation", *tc.queryIncludeRelations3)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -799,6 +801,30 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 				err := json.Unmarshal(rec.Body.Bytes(), &rsp)
 				assert.Nil(t, err)
 				assert.Equal(t, tc.expectedCnt, len(rsp))
+				header := rec.Header().Get(pagination.ResponseHeaderName)
+				require.NotEmpty(t, header)
+				page := &pagination.PageResponse{}
+				require.NoError(t, json.Unmarshal([]byte(header), page))
+				expectedPageNumber, expectedPageSize := 1, paginator.DefaultLimit
+				if tc.pageNumber != nil {
+					expectedPageNumber = *tc.pageNumber
+				}
+				if tc.pageSize != nil {
+					expectedPageSize = *tc.pageSize
+				}
+				assert.Equal(t, expectedPageNumber, page.PageNumber)
+				assert.Equal(t, expectedPageSize, page.PageSize)
+				assert.Equal(t, tc.orderBy, page.OrderBy)
+				if tc.expectedTotal != nil {
+					assert.Equal(t, *tc.expectedTotal, page.Total)
+				} else if tc.expectedCnt == 0 {
+					assert.Zero(t, page.Total)
+				}
+				if tc.expectedFirstEntry != nil {
+					require.NotEmpty(t, rsp)
+					assert.Equal(t, tc.expectedFirstEntry.Name, rsp[0].Name)
+				}
+
 				for i := 0; i < tc.expectedCnt; i++ {
 					assert.Equal(t, tn1.ID.String(), rsp[i].TenantID)
 				}
@@ -808,6 +834,7 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 						assert.Equal(t, *tc.expectedTenantOrg, rsp[0].Tenant.Org)
 					}
 					if tc.expectedSite != nil {
+						require.NotNil(t, rsp[0].Site)
 						assert.Equal(t, tc.expectedSite.Name, rsp[0].Site.Name)
 					}
 				} else {

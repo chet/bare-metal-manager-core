@@ -268,7 +268,7 @@ func sameCorePowerIdentity(expected, observed string) bool {
 		return false
 	}
 	hash, valid := normalizeCorePowerHash(expected[corePowerIDPrefixLength:])
-	return valid && hash == strings.ToLower(observed[corePowerIDPrefixLength:])
+	return valid && strings.EqualFold(hash, observed[corePowerIDPrefixLength:])
 }
 
 // normalizeCorePowerHash checks Core's Base32Hex representation before folding

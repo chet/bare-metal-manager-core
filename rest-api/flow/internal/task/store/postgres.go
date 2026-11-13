@@ -4,6 +4,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -395,7 +396,7 @@ func normalizedUUIDs(ids []uuid.UUID) []uuid.UUID {
 		result = append(result, id)
 	}
 	slices.SortFunc(result, func(a, b uuid.UUID) int {
-		return strings.Compare(a.String(), b.String())
+		return bytes.Compare(a[:], b[:])
 	})
 	return result
 }
